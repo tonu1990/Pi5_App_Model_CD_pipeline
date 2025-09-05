@@ -168,7 +168,7 @@ jobs:
   deliver:
     name: Deliver to Pi and flip current.onnx
     needs: validate
-    runs-on: [self-hosted, model-cd]
+    runs-on: [self-hosted, app_model_cd]
     steps:
       - name: Download validated bundle
         uses: actions/download-artifact@v4
