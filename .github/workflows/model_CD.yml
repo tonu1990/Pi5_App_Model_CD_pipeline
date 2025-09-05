@@ -1,4 +1,4 @@
-name: Model_CD(Ship latest Release ONNX to Pi)
+name: Model_CD(Ship latest ONNX model stored at Github release to Pi)
  
 on:
   # Auto-run when a new Release is published
