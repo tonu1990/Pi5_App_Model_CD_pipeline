@@ -1,0 +1,1 @@
+Add noteabout model training points like conversion to .ONNX format and so on
