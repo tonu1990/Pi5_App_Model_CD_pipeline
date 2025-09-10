@@ -52,6 +52,57 @@ The command will look like ***"curl -o actions-runner-linux-arm64-2.328.0.tar.gz
 
 8. Create the runner and start the configuration . The command will look something like ***./config.sh --url https://github.com/<your github repo> --token XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX***. We will execute an extended version of this command as below;
 
-    ***./config.sh --url https://github.com/<your github repo> --token XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX --name tonzz-pi --labels "pi5,app_model_cd" --unattended***
+    ***./config.sh --url https://github.com/<your github repo> --token XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX --name <runner_name> --labels "pi5,app_model_cd" --unattended***
 
     where name can be set as per requirement. The labels ***pi5,app_model_cd*** has to be set the same way as these values will be used during workflow run in Github actions.
+
+    Example : ***./config.sh --url https://github.com/tonu1990/Pi5_App_Model_CD_pipeline --token AN2Q6IQWYOX7ITMWWOSF6C3IX6U6Q  --name tonzz-pi --labels "pi5,app_model_cd" --unattended***
+
+9. Run the self hosted runner . There are two ways to do it . ***./run.sh*** as shown in Github repo steps. This will start the runner procees in the foreground. But we need to run the process in background, and for our use case we wil prefer that approach . For that execute below commands
+
+     ***sudo ./svc.sh install***
+
+     ***sudo ./svc.sh start***
+
+     ***sudo ./svc.sh status***
+
+10. After this step check the runners section in Github repo (Open the Github repo -> Settings -> Actions -> Runners) you can see the runner we created (with status Idle).
+
+11. One potential issue we might come across here is in case the Pi is turned off and On again, the connection between the Github runner and our pi will get lost. You will see our runner with status "Offline" in Repo. We can restart the runner everytime you turn on pi - do ***sudo ./svc.sh start***. 
+
+    If you wish to avoid this mannual restart every time, you can do step 12 , which will help to start the runner automatically at boot.
+
+12. Recommended additional step :  auto-start on boot of Pi. 
+
+    Find the service name for the runner - check the folder /etc/systemd/system and findout the service of our runner . The file name will look something like ***actions.runner.<github_repo>.<runner_name>.service***
+
+    Enable that service as with below command ;
+
+    ***sudo systemctl enable <your_service_name>***
+
+    Example : ***systemctl enable actions.runner.tonu1990-Pi5_App_Model_CD_pipeline.tonzz-pi.service***
+
+
+13. Additional useful commands :
+
+    a. ***systemctl is-enabled <your_service_name>***
+
+        To check if auto start is enabled
+
+    b. ***sudo systemctl disable <your_service_name>***
+
+        To disable auto start.
+
+    c. ***sudo ./svc.sh stop***
+
+        To stop the self host runner set up in step 9
+
+    d. ***sudo ./svc.sh uninstal***
+
+        To uninstall host runner set up in step 9
+
+    e. ***./config.sh remove***
+
+        To remove configurations set in step 8. You will have to give the token used for setup
+
+
