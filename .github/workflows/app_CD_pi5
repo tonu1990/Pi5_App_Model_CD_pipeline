@@ -1,0 +1,85 @@
+# pi5-deployer/.github/workflows/deploy-to-pi5.yml
+name: Deploy App to Pi5 - Generic workflow
+
+# This workflow is designed to be called from another repository.
+on:
+  workflow_call:
+    inputs:
+      image-name:
+        description: "Full name of the image in GHCR (e.g., 'ghcr.io/username/repo/image')"
+        required: true
+        type: string
+      container-name:
+        description: "Name to give the running Docker container"
+        required: true
+        type: string
+      host-port:
+        description: "Port on the Pi host to map to the container"
+        required: true
+        type: string
+      container-port:
+        description: "Port the application listens on inside the container"
+        required: true
+        type: string
+      env-file-path:
+        description: "Path to an env file (relative to the calling workflow's repo) to pass to the container. Optional."
+        required: false
+        type: string
+      extra-args:
+        description: "Any extra arguments to pass to the `docker run` command (e.g., '--device /dev/video0')"
+        required: false
+        type: string
+      tag:
+        description: "Image tag to deploy (e.g., 'latest', 'v1.0.0')"
+        required: false
+        type: string
+        default: 'latest'
+
+jobs:
+  deploy-to-pi:
+    # This job MUST run on your self-hosted runner on the Pi5
+    runs-on: [self-hosted, pi5, app_model_cd]
+
+    # Permissions to read the GHCR package
+    permissions:
+      packages: read
+
+    steps:
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute full image reference
+        id: image-ref
+        run: |
+          FULL_IMAGE_REF="${{ inputs.image-name }}:${{ inputs.tag }}"
+          echo "FULL_IMAGE_REF=$FULL_IMAGE_REF" >> $GITHUB_OUTPUT
+          echo "Pulling image: $FULL_IMAGE_REF"
+
+      - name: Pull new Docker image
+        run: docker pull ${{ steps.image-ref.outputs.FULL_IMAGE_REF }}
+
+      - name: Stop and remove old container (if exists)
+        run: |
+          docker stop ${{ inputs.container-name }} || true
+          docker rm ${{ inputs.container-name }} || true
+
+      - name:  Run new container
+        run: |
+          docker run -d \
+            --name ${{ inputs.container-name }} \
+            --restart unless-stopped \
+            -p ${{ inputs.host-port }}:${{ inputs.container-port }} \
+            ${{ inputs.extra-args }} \
+            ${{ steps.image-ref.outputs.FULL_IMAGE_REF }}
+
+      - name: Verify deployment
+        run: |
+          echo "Container status:"
+          docker ps --filter "name=${{ inputs.container-name }}"
+          echo ""
+          echo "Recent logs:"
+          docker logs --tail 50 ${{ inputs.container-name }} || echo "Container might still be starting up..."
