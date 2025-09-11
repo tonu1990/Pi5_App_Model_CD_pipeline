@@ -103,10 +103,11 @@ jobs:
           docker run -d \
             --name ${{ inputs.container-name }} \
             --restart unless-stopped \
+            -v /opt/edge/models:/opt/edge/models:ro \
             -p ${{ inputs.host-port }}:${{ inputs.container-port }} \
             ${{ inputs.extra-args }} \
-            ${{ steps.image-ref.outputs.FULL_IMAGE_REF }}\
-            -v /opt/edge/models:/opt/edge/models:ro
+            ${{ steps.image-ref.outputs.FULL_IMAGE_REF }}
+          
 
       - name: Verify deployment
         run: |
