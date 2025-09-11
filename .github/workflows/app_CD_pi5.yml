@@ -1,8 +1,41 @@
 # pi5-deployer/.github/workflows/deploy-to-pi5.yml
-name: Deploy App to Pi5 - Generic workflow
+name: Deploy to Pi5 Fleet
 
-# This workflow is designed to be called from another repository.
+# This workflow can now be triggered in TWO ways:
+# 1. Directly via a manual dispatch (gets the "Run workflow" button).
+# 2. By being called from another workflow (reusable).
 on:
+  # Trigger for manual execution ("Run workflow" button)
+  workflow_dispatch:
+    inputs:
+      image-name:
+        description: "Full name of the image in GHCR (e.g., 'ghcr.io/username/repo/image')"
+        required: true
+        type: string
+      container-name:
+        description: "Name to give the running Docker container"
+        required: true
+        type: string
+      host-port:
+        description: "Port on the Pi host to map to the container"
+        required: true
+        type: string
+      container-port:
+        description: "Port the application listens on inside the container"
+        required: true
+        type: string
+      tag:
+        description: "Image tag to deploy (e.g., 'latest', 'v1.0.0')"
+        required: false
+        type: string
+        default: 'latest'
+      extra-args:
+        description: "Any extra Docker run arguments (e.g., '--device /dev/video0')"
+        required: false
+        type: string
+      # Note: env-file-path is harder to pass manually, so it's often omitted from dispatch.
+
+  # Trigger for being called as a reusable workflow
   workflow_call:
     inputs:
       image-name:
@@ -22,11 +55,11 @@ on:
         required: true
         type: string
       env-file-path:
-        description: "Path to an env file (relative to the calling workflow's repo) to pass to the container. Optional."
+        description: "Path to an env file to pass to the container. Optional."
         required: false
         type: string
       extra-args:
-        description: "Any extra arguments to pass to the `docker run` command (e.g., '--device /dev/video0')"
+        description: "Any extra arguments to pass to the `docker run` command"
         required: false
         type: string
       tag:
@@ -35,12 +68,10 @@ on:
         type: string
         default: 'latest'
 
+# The job itself remains identical. It uses the inputs from either trigger.
 jobs:
   deploy-to-pi:
-    # This job MUST run on your self-hosted runner on the Pi5
     runs-on: [self-hosted, pi5, app_model_cd]
-
-    # Permissions to read the GHCR package
     permissions:
       packages: read
 
@@ -67,7 +98,7 @@ jobs:
           docker stop ${{ inputs.container-name }} || true
           docker rm ${{ inputs.container-name }} || true
 
-      - name:  Run new container
+      - name: Run new container
         run: |
           docker run -d \
             --name ${{ inputs.container-name }} \
