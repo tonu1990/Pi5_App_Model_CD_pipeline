@@ -83,20 +83,26 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Compute full image reference
+      - name: Get Docker image name planned for deployement
         id: image-ref
         run: |
           FULL_IMAGE_REF="${{ inputs.image-name }}:${{ inputs.tag }}"
           echo "FULL_IMAGE_REF=$FULL_IMAGE_REF" >> $GITHUB_OUTPUT
           echo "Pulling image: $FULL_IMAGE_REF"
 
-      - name: Pull new Docker image
+      - name: Pull Docker image from GHCR
         run: docker pull ${{ steps.image-ref.outputs.FULL_IMAGE_REF }}
 
       - name: Stop and remove old container (if exists)
         run: |
           docker stop ${{ inputs.container-name }} || true
           docker rm ${{ inputs.container-name }} || true
+      
+      - name: Verify model mount directory exists in Pi
+        run: |
+          test -d /opt/edge/models || { echo "Missing /opt/edge/models"; exit 1; }
+          ls -l /opt/edge/models || true
+          readlink -f /opt/edge/models/current.onnx || echo "Note: current.onnx not set yet"
 
       - name: Run new container
         run: |
