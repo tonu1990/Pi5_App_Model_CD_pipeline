@@ -105,7 +105,8 @@ jobs:
             --restart unless-stopped \
             -p ${{ inputs.host-port }}:${{ inputs.container-port }} \
             ${{ inputs.extra-args }} \
-            ${{ steps.image-ref.outputs.FULL_IMAGE_REF }}
+            ${{ steps.image-ref.outputs.FULL_IMAGE_REF }}\
+            -v /opt/edge/models:/opt/edge/models:ro
 
       - name: Verify deployment
         run: |
