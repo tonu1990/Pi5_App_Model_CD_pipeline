@@ -1,5 +1,5 @@
 # .github/workflows/deploy-to-pi5.yml
-name: Deploy to Pi5 Fleet
+name: App CD : Deploy App Image from GHCR to Pi5
 
 on:
   workflow_dispatch:
