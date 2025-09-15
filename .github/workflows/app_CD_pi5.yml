@@ -1,17 +1,17 @@
 # pi5-deployer/.github/workflows/deploy-to-pi5.yml
 name: Deploy to Pi5 Fleet
 
-# This workflow can now be triggered in TWO ways:
-# 1. Directly via a manual dispatch (gets the "Run workflow" button).
-# 2. By being called from another workflow (reusable).
+env:
+  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/${{ vars.IMAGE_NAME }}
+
 on:
-  # Trigger for manual execution ("Run workflow" button)
   workflow_dispatch:
     inputs:
       image-name:
-        description: "Full name of the image in GHCR (e.g., 'ghcr.io/username/repo/image')"
-        required: true
+        description: "Full name of the image in GHCR (leave blank to use env.IMAGE_NAME)"
+        required: false
         type: string
+        default: ""
       container-name:
         description: "Name to give the running Docker container"
         required: true
@@ -28,47 +28,12 @@ on:
         description: "Image tag to deploy (e.g., 'latest', 'v1.0.0')"
         required: false
         type: string
-        default: 'latest'
+        default: "latest"
       extra-args:
         description: "Any extra Docker run arguments (e.g., '--device /dev/video0')"
         required: false
         type: string
-      # Note: env-file-path is harder to pass manually, so it's often omitted from dispatch.
 
-  # Trigger for being called as a reusable workflow
-  workflow_call:
-    inputs:
-      image-name:
-        description: "Full name of the image in GHCR (e.g., 'ghcr.io/username/repo/image')"
-        required: true
-        type: string
-      container-name:
-        description: "Name to give the running Docker container"
-        required: true
-        type: string
-      host-port:
-        description: "Port on the Pi host to map to the container"
-        required: true
-        type: string
-      container-port:
-        description: "Port the application listens on inside the container"
-        required: true
-        type: string
-      env-file-path:
-        description: "Path to an env file to pass to the container. Optional."
-        required: false
-        type: string
-      extra-args:
-        description: "Any extra arguments to pass to the `docker run` command"
-        required: false
-        type: string
-      tag:
-        description: "Image tag to deploy (e.g., 'latest', 'v1.0.0')"
-        required: false
-        type: string
-        default: 'latest'
-
-# The job itself remains identical. It uses the inputs from either trigger.
 jobs:
   deploy-to-pi:
     runs-on: [self-hosted, pi5, app_model_cd]
@@ -83,11 +48,24 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Get Docker image name planned for deployement
+      - name: Resolve IMAGE_NAME (input > env fallback)
+        id: resolve_image
+        shell: bash
+        run: |
+          INPUT_NAME="${{ inputs.image-name }}"
+          if [ -n "$INPUT_NAME" ]; then
+            NAME="$INPUT_NAME"
+          else
+            NAME="${{ env.IMAGE_NAME }}"
+          fi
+          echo "IMAGE_NAME=$NAME" >> "$GITHUB_OUTPUT"
+          echo "Resolved IMAGE_NAME=$NAME"
+
+      - name: Get Docker image ref planned for deployment
         id: image-ref
         run: |
-          FULL_IMAGE_REF="${{ inputs.image-name }}:${{ inputs.tag }}"
-          echo "FULL_IMAGE_REF=$FULL_IMAGE_REF" >> $GITHUB_OUTPUT
+          FULL_IMAGE_REF="${{ steps.resolve_image.outputs.IMAGE_NAME }}:${{ inputs.tag }}"
+          echo "FULL_IMAGE_REF=$FULL_IMAGE_REF" >> "$GITHUB_OUTPUT"
           echo "Pulling image: $FULL_IMAGE_REF"
 
       - name: Pull Docker image from GHCR
@@ -97,7 +75,7 @@ jobs:
         run: |
           docker stop ${{ inputs.container-name }} || true
           docker rm ${{ inputs.container-name }} || true
-      
+
       - name: Verify model mount directory exists in Pi
         run: |
           test -d /opt/edge/models || { echo "Missing /opt/edge/models"; exit 1; }
@@ -113,7 +91,6 @@ jobs:
             -p ${{ inputs.host-port }}:${{ inputs.container-port }} \
             ${{ inputs.extra-args }} \
             ${{ steps.image-ref.outputs.FULL_IMAGE_REF }}
-          
 
       - name: Verify deployment
         run: |
