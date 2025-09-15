@@ -37,11 +37,6 @@ on:
         default: "latest"
 
 
-
-permissions:
-  contents: read
-  packages: read
-
 jobs:
   deploy-to-pi:
     runs-on: [self-hosted, pi5, app_model_cd]
