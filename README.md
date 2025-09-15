@@ -8,18 +8,22 @@ The template comes with two workflows ;
 
 **1. Model_CD**
 
-See Actions tab under the project Repo look for "Model_CD(Ship latest ONNX model stored at Github release to Pi)". The workflow is defined at .github/workflows/model_CD.yml
+See Actions tab under the project Repo - look for workflow **"Model CD - Ship latest ONNX model Pi"**. The workflow is defined at .github/workflows/model_CD_pi.yml
 
 This workflow pulls the final .ONNX model from GitHub Releases, validates it, then ships it to the Pi 5 via a self-hosted runner.
 
-So **to you use this template, the final model (.ONNX format) after model training and validation has to be made available to Github release** for deploying the model to Pi5.
+So to you use this template
+
+ **1.the final model (.ONNX format) after model training and validation has to be made available to Github release** for deploying the model to Pi5.
+
+**2.the following Model directories must be present in Raspberry Pi opt/edge/models ,/opt/edge/models/models ,/opt/edge/models/manifests** - this step explained later.
 
 Please read the readme file under Model_dev section for specific points to keep in mind when you are trianing your model.
 
 
 **2.App CD**
 
-See Actions tab under the project Repo look for "App CD • deploy Image from GHCR on Pi". The workflow is defined at .github/workflows/app_CD.yml.
+See Actions tab under the project Repo and look for workflow **"App CD - Deploy App Image from GHCR to Pi5"**. The workflow is defined at .github/workflows/app_CD.yml.
 
 This workflow deploys the multi-arch Docker image (amd64/arm64) of the App present in GHCR to the Pi5.
 
@@ -29,6 +33,11 @@ Please read readme file under App_dev section for specific points to keep in min
 
 ### **One time set up in Raspberry Pi**
 
+#### **1.Set up Pi directories**
+
+--- add ---
+
+#### **2.Set up Self Hosted Runner**
 The prerequiste for the above two piplelines is to establish an active connection between our Github repo and the Raspberry Pi (where we deploy our App and Model). 
 
 We use **self hosted runners** for this . Setting up a self-hosted runner provides you with the flexibility to run workflows on your own hardware.
