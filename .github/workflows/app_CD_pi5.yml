@@ -1,22 +1,22 @@
 # .github/workflows/deploy-to-pi5.yml
-name: Deploy Image from GHCR to Pi5
+name: Deploy to Pi5 Fleet
 
 on:
   workflow_dispatch:
     inputs:
-      # Optional: keep this if you want to manually override at dispatch time
+      # Optional: keep this if you want to manually override the image at dispatch
       image-name:
-        description: "Image from GHCR to deploy(leave blank to use repo variable IMAGE_NAME)"
+        description: "Image name from GHCR (leave blank to use repo variable IMAGE_NAME)"
         required: false
         type: string
         default: ""
       container-name:
-        description: "Application container name to create at Pi(leave blank to use .env APP_NAME)"
+        description: "Container base name (leave blank to use .env APP_NAME). Suffix -dev/-prod will be added automatically."
         required: false
         type: string
         default: ""
       host-port:
-        description: "Pi Host port (leave blank to use .env HOST_PORT)"
+        description: "Override host port (rare). Leave blank to use HOST_PORT_DEV or HOST_PORT_PROD from .env based on environment."
         required: false
         type: string
         default: ""
@@ -30,6 +30,16 @@ on:
         required: false
         type: string
         default: "latest"
+      extra-args:
+        description: "Extra docker run args (e.g. --device /dev/video0)"
+        required: false
+        type: string
+        default: ""
+      environment:
+        description: "Deployment Environment - Leave blank for Dev/QA, input P for production deployment"
+        required: false
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -47,7 +57,6 @@ jobs:
         run: |
           set -euo pipefail
           if [ -f .env ]; then
-            # Only source lines like VAR=VALUE
             if grep -q '^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*[[:space:]]*=' .env; then
               set -a
               # shellcheck disable=SC1091
@@ -57,9 +66,10 @@ jobs:
               echo "Found .env, but no VAR=VALUE lines were detected. Skipping."
             fi
           fi
-          echo "APP_NAME=${APP_NAME:-}"   >> "$GITHUB_ENV"
-          echo "HOST_PORT=${HOST_PORT:-}" >> "$GITHUB_ENV"
-          echo "APP_PORT=${APP_PORT:-}"   >> "$GITHUB_ENV"
+          echo "APP_NAME=${APP_NAME:-}"        >> "$GITHUB_ENV"
+          echo "HOST_PORT_DEV=${HOST_PORT_DEV:-}"   >> "$GITHUB_ENV"
+          echo "HOST_PORT_PROD=${HOST_PORT_PROD:-}" >> "$GITHUB_ENV"
+          echo "APP_PORT=${APP_PORT:-}"        >> "$GITHUB_ENV"
 
       - name: Resolve deployment parameters
         id: resolve
@@ -67,52 +77,67 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Inputs (image-name is optional; remove these 2 lines if you don't want it at all)
+          # Inputs
           IN_IMAGE="${{ inputs.image-name }}"
+          IN_NAME="${{ inputs.container-name }}"
+          IN_HOST="${{ inputs.host-port }}"
+          IN_CONT="${{ inputs.container-port }}"
           IN_TAG="${{ inputs.tag }}"
+          IN_ENV="${{ inputs.environment }}"
 
-          # Repo variable (must be set if no input is provided)
+          # Repo variable IMAGE_NAME (must be set if no input is provided)
           VAR_IMAGE="${{ vars.IMAGE_NAME }}"
 
-          # Decide image name:
-          # 1) Use manual input if provided
-          # 2) Else use repo variable IMAGE_NAME
+          # Decide image name: input > repo variable
           if [ -n "$IN_IMAGE" ]; then
             IMAGE_NAME="$IN_IMAGE"
           else
             if [ -z "$VAR_IMAGE" ]; then
               echo "ERROR: Repository variable IMAGE_NAME is not set, and no image-name input was provided."
-              echo "Please set Settings → Variables → Repository variables → IMAGE_NAME (e.g., 'ghcr.io/<owner>/<repo>' or just '<repo>')."
+              echo "Set Settings → Variables → Repository variables → IMAGE_NAME (e.g., 'ghcr.io/<owner>/<repo>' or just '<repo>')."
               exit 1
             fi
             IMAGE_NAME="$VAR_IMAGE"
           fi
-
-          # If IMAGE_NAME is bare (no registry prefix), prefix with ghcr.io/<owner>/
+          # If bare name, prefix with ghcr.io/<owner>/
           if [[ "$IMAGE_NAME" != ghcr.io/* ]]; then
             IMAGE_NAME="ghcr.io/${{ github.repository_owner }}/$IMAGE_NAME"
           fi
 
+          # Env normalization: blank => dev, 'P' => prod
+          case "$IN_ENV" in
+            P|p) DEPLOY_ENV="prod" ;;
+            *)   DEPLOY_ENV="dev"  ;;
+          esac
+
+          # Container base name (input > .env > default)
+          BASE_NAME="${IN_NAME:-${APP_NAME:-pcb-app}}"
+          # Add suffix to avoid collisions
+          if [ "$DEPLOY_ENV" = "prod" ]; then
+            CONTAINER_NAME="${BASE_NAME}-prod"
+          else
+            CONTAINER_NAME="${BASE_NAME}-dev"
+          fi
+
+          # Host port selection:
+          # If user manually provided host-port input, use it; else choose based on environment
+          if [ -n "$IN_HOST" ]; then
+            HOST_PORT_VAL="$IN_HOST"
+          else
+            if [ "$DEPLOY_ENV" = "prod" ]; then
+              HOST_PORT_VAL="${HOST_PORT_PROD:-8000}"
+            else
+              HOST_PORT_VAL="${HOST_PORT_DEV:-3000}"
+            fi
+          fi
+
+          # Container port (input > .env > default)
+          CONT_PORT_VAL="${IN_CONT:-${APP_PORT:-8080}}"
+
           TAG="${IN_TAG:-latest}"
           FULL_IMAGE_REF="${IMAGE_NAME}:${TAG}"
 
-          # Container config: inputs > .env > defaults
-          CONTAINER_NAME="${{ inputs.container-name }}"
-          if [ -z "$CONTAINER_NAME" ]; then
-            CONTAINER_NAME="${APP_NAME:-pcb-app}"
-          fi
-
-          HOST_PORT_VAL="${{ inputs.host-port }}"
-          if [ -z "$HOST_PORT_VAL" ]; then
-            HOST_PORT_VAL="${HOST_PORT:-8080}"
-          fi
-
-          CONT_PORT_VAL="${{ inputs.container-port }}"
-          if [ -z "$CONT_PORT_VAL" ]; then
-            CONT_PORT_VAL="${APP_PORT:-8080}"
-          fi
-
-          # Validate ports are numeric
+          # Basic validation
           [[ "$HOST_PORT_VAL" =~ ^[0-9]+$ ]] || { echo "HOST_PORT must be numeric"; exit 1; }
           [[ "$CONT_PORT_VAL" =~ ^[0-9]+$ ]] || { echo "CONTAINER_PORT must be numeric"; exit 1; }
 
@@ -123,6 +148,7 @@ jobs:
             echo "CONTAINER_PORT=$CONT_PORT_VAL"
             echo "TAG=$TAG"
             echo "FULL_IMAGE_REF=$FULL_IMAGE_REF"
+            echo "DEPLOY_ENV=$DEPLOY_ENV"
           } >> "$GITHUB_OUTPUT"
 
           {
@@ -130,6 +156,7 @@ jobs:
             echo ""
             echo "| Key | Value |"
             echo "|---|---|"
+            echo "| Env | \`${DEPLOY_ENV}\` |"
             echo "| Image | \`${FULL_IMAGE_REF}\` |"
             echo "| Container name | \`${CONTAINER_NAME}\` |"
             echo "| Host port | \`${HOST_PORT_VAL}\` |"
@@ -146,11 +173,29 @@ jobs:
       - name: Pull Docker image
         run: docker pull "${{ steps.resolve.outputs.FULL_IMAGE_REF }}"
 
-      - name: Stop and remove old container (if exists)
+      - name: Stop and remove old container with same name (if exists)
         shell: bash
         run: |
           docker stop "${{ steps.resolve.outputs.CONTAINER_NAME }}" || true
           docker rm   "${{ steps.resolve.outputs.CONTAINER_NAME }}" || true
+
+      - name: Check for host-port conflicts
+        shell: bash
+        run: |
+          set -euo pipefail
+          PORT="${{ steps.resolve.outputs.HOST_PORT }}"
+          NAME="${{ steps.resolve.outputs.CONTAINER_NAME }}"
+
+          CONFLICTS=$(docker ps --format '{{.Names}} {{.Ports}}' \
+            | grep -E "0\.0\.0\.0:${PORT}->|\\[::\\]:${PORT}->" \
+            | awk '{print $1}' \
+            | grep -v "^${NAME}$" || true)
+
+          if [ -n "$CONFLICTS" ]; then
+            echo "ERROR: Host port ${PORT} is already in use by: ${CONFLICTS}"
+            echo "Pick a different host port, stop the conflicting container(s), or use a reverse proxy."
+            exit 1
+          fi
 
       - name: Verify model mount directory exists on Pi
         shell: bash
@@ -158,25 +203,6 @@ jobs:
           test -d /opt/edge/models || { echo "Missing /opt/edge/models"; exit 1; }
           ls -l /opt/edge/models || true
           readlink -f /opt/edge/models/current.onnx || echo "Note: current.onnx not set yet"
-      
-      - name: Check for host-port conflicts
-        shell: bash
-        run: |
-          set -euo pipefail
-          PORT="${{ steps.resolve.outputs.HOST_PORT }}"
-          NAME="${{ steps.resolve.outputs.CONTAINER_NAME }}"
-      
-          # Find any containers publishing this host port (other than ours)
-          CONFLICTS=$(docker ps --format '{{.Names}} {{.Ports}}' \
-            | grep -E "0\.0\.0\.0:${PORT}->|\\[::\\]:${PORT}->" \
-            | awk '{print $1}' \
-            | grep -v "^${NAME}$" || true)
-      
-          if [ -n "$CONFLICTS" ]; then
-            echo "ERROR: Host port ${PORT} is already in use by container(s): ${CONFLICTS}"
-            echo "Choose a different host port in .env file or stop the conflicting container(s)"
-            exit 1
-          fi
 
       - name: Run new container
         shell: bash
@@ -194,6 +220,7 @@ jobs:
             --restart unless-stopped \
             -v /opt/edge/models:/opt/edge/models:ro \
             -p ${{ steps.resolve.outputs.HOST_PORT }}:${{ steps.resolve.outputs.CONTAINER_PORT }} \
+            -l app.env=${{ steps.resolve.outputs.DEPLOY_ENV }} \
             -l org.opencontainers.image.source=${{ github.repository }} \
             -l org.opencontainers.image.revision=${{ github.sha }} \
             "${EXTRA_ARR[@]}" \
@@ -203,4 +230,7 @@ jobs:
         shell: bash
         run: |
           echo "Container status:"
-          docker
+          docker ps --filter "name=${{ steps.resolve.outputs.CONTAINER_NAME }}"
+          echo ""
+          echo "Recent logs:"
+          docker logs --tail 50 "${{ steps.resolve.outputs.CONTAINER_NAME }}" || echo "Container might still be starting up..."
