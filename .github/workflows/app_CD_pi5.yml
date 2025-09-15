@@ -1,46 +1,123 @@
-# pi5-deployer/.github/workflows/deploy-to-pi5.yml
+# .github/workflows/deploy-to-pi5.yml
 name: Deploy to Pi5 Fleet
-
-env:
-  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/${{ vars.IMAGE_NAME }}
 
 on:
   workflow_dispatch:
     inputs:
       image-name:
-        description: "Full name of the image in GHCR (leave blank to use env.IMAGE_NAME)"
+        description: "Full image name (leave blank to auto-resolve)"
         required: false
         type: string
         default: ""
       container-name:
-        description: "Name to give the running Docker container"
-        required: true
+        description: "Container name (blank = .env APP_NAME or 'pcb-app')"
+        required: false
         type: string
+        default: ""
       host-port:
-        description: "Port on the Pi host to map to the container"
-        required: true
+        description: "Host port (blank = .env HOST_PORT or 8080)"
+        required: false
         type: string
+        default: ""
       container-port:
-        description: "Port the application listens on inside the container"
-        required: true
+        description: "Container port (blank = .env APP_PORT or 8080)"
+        required: false
         type: string
+        default: ""
       tag:
-        description: "Image tag to deploy (e.g., 'latest', 'v1.0.0')"
+        description: "Image tag"
         required: false
         type: string
         default: "latest"
       extra-args:
-        description: "Any extra Docker run arguments (e.g., '--device /dev/video0')"
+        description: "Extra docker run args (e.g. --device /dev/video0)"
         required: false
         type: string
+        default: ""
+
+permissions:
+  contents: read
+  packages: read
+
+env:
+  # Default image if nothing else provided
+  DEFAULT_IMAGE: ghcr.io/${{ toLower(github.repository) }}
+  # Optional override via repo Variable IMAGE_NAME (either full ghcr.io/... or just repo name)
+  OVERRIDE_IMAGE: ${{ vars.IMAGE_NAME }}
 
 jobs:
   deploy-to-pi:
     runs-on: [self-hosted, pi5, app_model_cd]
-    permissions:
-      packages: read
 
     steps:
+      - uses: actions/checkout@v4
+
+      - name: Load .env (if present)
+        shell: bash
+        run: |
+          if [ -f .env ]; then
+            set -a
+            . ./.env
+            set +a
+          fi
+          # Export (non-secret) values for later steps if present
+          echo "APP_NAME=${APP_NAME:-}"   >> "$GITHUB_ENV"
+          echo "HOST_PORT=${HOST_PORT:-}" >> "$GITHUB_ENV"
+          echo "APP_PORT=${APP_PORT:-}"   >> "$GITHUB_ENV"
+
+      - name: Resolve deployment parameters
+        id: resolve
+        shell: bash
+        run: |
+          IN_IMAGE="${{ inputs.image-name }}"
+          IN_NAME="${{ inputs.container-name }}"
+          IN_HOST="${{ inputs.host-port }}"
+          IN_CONT="${{ inputs.container-port }}"
+          IN_TAG="${{ inputs.tag }}"
+
+          # Compute IMAGE_NAME: input > repo Variable override > default ghcr.io/<owner>/<repo>
+          if [ -n "$IN_IMAGE" ]; then
+            IMAGE_NAME="$IN_IMAGE"
+          else
+            OV="${{ env.OVERRIDE_IMAGE }}"
+            if [ -n "$OV" ]; then
+              if [[ "$OV" == ghcr.io/* ]]; then
+                IMAGE_NAME="$OV"
+              else
+                IMAGE_NAME="ghcr.io/${{ github.repository_owner }}/$OV"
+              fi
+            else
+              IMAGE_NAME="${{ env.DEFAULT_IMAGE }}"
+            fi
+          fi
+
+          # Resolve container parameters (inputs > .env > sensible defaults)
+          CONTAINER_NAME="${IN_NAME:-${APP_NAME:-pcb-app}}"
+          HOST_PORT="${IN_HOST:-${HOST_PORT:-8080}}"
+          CONTAINER_PORT="${IN_CONT:-${APP_PORT:-8080}}"
+          TAG="${IN_TAG:-latest}"
+          FULL_IMAGE_REF="${IMAGE_NAME}:${TAG}"
+
+          {
+            echo "IMAGE_NAME=$IMAGE_NAME"
+            echo "CONTAINER_NAME=$CONTAINER_NAME"
+            echo "HOST_PORT=$HOST_PORT"
+            echo "CONTAINER_PORT=$CONTAINER_PORT"
+            echo "TAG=$TAG"
+            echo "FULL_IMAGE_REF=$FULL_IMAGE_REF"
+          } >> "$GITHUB_OUTPUT"
+
+          {
+            echo "### Deployment parameters"
+            echo ""
+            echo "| Key | Value |"
+            echo "|---|---|"
+            echo "| Image | \`${FULL_IMAGE_REF}\` |"
+            echo "| Container name | \`${CONTAINER_NAME}\` |"
+            echo "| Host port | \`${HOST_PORT}\` |"
+            echo "| Container port | \`${CONTAINER_PORT}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
         with:
@@ -48,35 +125,15 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Resolve IMAGE_NAME (input > env fallback)
-        id: resolve_image
-        shell: bash
-        run: |
-          INPUT_NAME="${{ inputs.image-name }}"
-          if [ -n "$INPUT_NAME" ]; then
-            NAME="$INPUT_NAME"
-          else
-            NAME="${{ env.IMAGE_NAME }}"
-          fi
-          echo "IMAGE_NAME=$NAME" >> "$GITHUB_OUTPUT"
-          echo "Resolved IMAGE_NAME=$NAME"
-
-      - name: Get Docker image ref planned for deployment
-        id: image-ref
-        run: |
-          FULL_IMAGE_REF="${{ steps.resolve_image.outputs.IMAGE_NAME }}:${{ inputs.tag }}"
-          echo "FULL_IMAGE_REF=$FULL_IMAGE_REF" >> "$GITHUB_OUTPUT"
-          echo "Pulling image: $FULL_IMAGE_REF"
-
-      - name: Pull Docker image from GHCR
-        run: docker pull ${{ steps.image-ref.outputs.FULL_IMAGE_REF }}
+      - name: Pull Docker image
+        run: docker pull "${{ steps.resolve.outputs.FULL_IMAGE_REF }}"
 
       - name: Stop and remove old container (if exists)
         run: |
-          docker stop ${{ inputs.container-name }} || true
-          docker rm ${{ inputs.container-name }} || true
+          docker stop "${{ steps.resolve.outputs.CONTAINER_NAME }}" || true
+          docker rm   "${{ steps.resolve.outputs.CONTAINER_NAME }}" || true
 
-      - name: Verify model mount directory exists in Pi
+      - name: Verify model mount directory exists on Pi
         run: |
           test -d /opt/edge/models || { echo "Missing /opt/edge/models"; exit 1; }
           ls -l /opt/edge/models || true
@@ -85,17 +142,17 @@ jobs:
       - name: Run new container
         run: |
           docker run -d \
-            --name ${{ inputs.container-name }} \
+            --name "${{ steps.resolve.outputs.CONTAINER_NAME }}" \
             --restart unless-stopped \
             -v /opt/edge/models:/opt/edge/models:ro \
-            -p ${{ inputs.host-port }}:${{ inputs.container-port }} \
+            -p ${{ steps.resolve.outputs.HOST_PORT }}:${{ steps.resolve.outputs.CONTAINER_PORT }} \
             ${{ inputs.extra-args }} \
-            ${{ steps.image-ref.outputs.FULL_IMAGE_REF }}
+            "${{ steps.resolve.outputs.FULL_IMAGE_REF }}"
 
       - name: Verify deployment
         run: |
           echo "Container status:"
-          docker ps --filter "name=${{ inputs.container-name }}"
+          docker ps --filter "name=${{ steps.resolve.outputs.CONTAINER_NAME }}"
           echo ""
           echo "Recent logs:"
-          docker logs --tail 50 ${{ inputs.container-name }} || echo "Container might still be starting up..."
+          docker logs --tail 50 "${{ steps.resolve.outputs.CONTAINER_NAME }}" || echo "Container might still be starting up..."
