@@ -158,6 +158,26 @@ jobs:
           test -d /opt/edge/models || { echo "Missing /opt/edge/models"; exit 1; }
           ls -l /opt/edge/models || true
           readlink -f /opt/edge/models/current.onnx || echo "Note: current.onnx not set yet"
+      
+      - name: Check for host-port conflicts
+        shell: bash
+        run: |
+          set -euo pipefail
+          PORT="${{ steps.resolve.outputs.HOST_PORT }}"
+          NAME="${{ steps.resolve.outputs.CONTAINER_NAME }}"
+      
+          # Find any containers publishing this host port (other than ours)
+          CONFLICTS=$(docker ps --format '{{.Names}} {{.Ports}}' \
+            | grep -E "0\.0\.0\.0:${PORT}->|\\[::\\]:${PORT}->" \
+            | awk '{print $1}' \
+            | grep -v "^${NAME}$" || true)
+      
+          if [ -n "$CONFLICTS" ]; then
+            echo "ERROR: Host port ${PORT} is already in use by container(s): ${CONFLICTS}"
+            echo "Choose a different host port, stop the conflicting container(s),"
+            echo "or expose your app behind a reverse proxy."
+            exit 1
+          fi
 
       - name: Run new container
         shell: bash
