@@ -5,23 +5,28 @@ on:
   workflow_dispatch:
     inputs:
       # Optional: keep this if you want to manually override the image at dispatch
+      environment:
+        description: "Deployment Environment (leave blank for Dev/QA, input P for production deployment"
+        required: false
+        type: string
+        default: ""
       image-name:
-        description: "Image name from GHCR (leave blank to use repo variable IMAGE_NAME)"
+        description: "GHCR Image name to deploy(leave blank if Repo variable is set as IMAGE_NAME and used as Image name)"
         required: false
         type: string
         default: ""
       container-name:
-        description: "Container base name (leave blank to use .env APP_NAME). Suffix -dev/-prod will be added automatically."
+        description: "Pi Container name(leave blank to use APP_NAME set in .env ). Suffix -dev/-prod will be added automatically."
         required: false
         type: string
         default: ""
       host-port:
-        description: "Override host port (rare). Leave blank to use HOST_PORT_DEV or HOST_PORT_PROD from .env based on environment."
+        description: "Pi host port(leave blank to use HOST_PORT_DEV or HOST_PORT_PROD from .env based on environment)."
         required: false
         type: string
         default: ""
       container-port:
-        description: "Container port (leave blank to use .env APP_PORT)"
+        description: "App Container port (leave blank to use .env APP_PORT)"
         required: false
         type: string
         default: ""
@@ -30,16 +35,8 @@ on:
         required: false
         type: string
         default: "latest"
-      extra-args:
-        description: "Extra docker run args (e.g. --device /dev/video0)"
-        required: false
-        type: string
-        default: ""
-      environment:
-        description: "Deployment Environment - Leave blank for Dev/QA, input P for production deployment"
-        required: false
-        type: string
-        default: ""
+
+
 
 permissions:
   contents: read
