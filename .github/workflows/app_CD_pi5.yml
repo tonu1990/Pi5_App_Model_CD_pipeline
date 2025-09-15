@@ -174,8 +174,7 @@ jobs:
       
           if [ -n "$CONFLICTS" ]; then
             echo "ERROR: Host port ${PORT} is already in use by container(s): ${CONFLICTS}"
-            echo "Choose a different host port, stop the conflicting container(s),"
-            echo "or expose your app behind a reverse proxy."
+            echo "Choose a different host port in .env file or stop the conflicting container(s)"
             exit 1
           fi
 
