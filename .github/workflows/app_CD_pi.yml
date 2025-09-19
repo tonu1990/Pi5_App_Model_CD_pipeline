@@ -5,22 +5,17 @@ on:
   workflow_dispatch:
     inputs:
       image-name:
-        description: "GHCR image name to deploy (leave blank to use repo variable IMAGE_NAME)"
+        description: "Application image name (from GHCR) to deploy -leave blank to use repo variable IMAGE_NAME"
         required: false
         type: string
         default: ""
       container-name:
-        description: "Pi container name (leave blank to use APP_NAME from .env or 'pi_app')"
+        description: "Name to use Pi for Application container -leave blank to use APP_NAME from .env or 'pi_app'"
         required: false
         type: string
         default: ""
       host-port:
-        description: "Pi host port (leave blank to use HOST_PORT from .env or 8000)"
-        required: false
-        type: string
-        default: ""
-      container-port:
-        description: "App container port (leave blank to use APP_PORT from .env or 8080)"
+        description: "Host port in Pi where Application is to be deployed -leave blank to use HOST_PORT from .env"
         required: false
         type: string
         default: ""
@@ -30,7 +25,7 @@ on:
         type: string
         default: "latest"
       extra-args:
-        description: "Additional Docker run arguments"
+        description: "Additional Docker run arguments (e.g., --env KEY=VAL)"
         required: false
         type: string
         default: ""
@@ -56,9 +51,9 @@ jobs:
               echo "Found .env, but no VAR=VALUE lines were detected. Skipping."
             fi
           fi
-          echo "APP_NAME=${APP_NAME:-}"  >> "$GITHUB_ENV"
+          echo "APP_NAME=${APP_NAME:-}"   >> "$GITHUB_ENV"
           echo "HOST_PORT=${HOST_PORT:-}" >> "$GITHUB_ENV"
-          echo "APP_PORT=${APP_PORT:-}"  >> "$GITHUB_ENV"
+          echo "APP_PORT=${APP_PORT:-}"   >> "$GITHUB_ENV"
 
       - name: Resolve deployment parameters
         id: resolve
@@ -69,7 +64,6 @@ jobs:
           IN_IMAGE="${{ inputs['image-name'] }}"
           IN_NAME="${{ inputs['container-name'] }}"
           IN_HOST="${{ inputs['host-port'] }}"
-          IN_CONT="${{ inputs['container-port'] }}"
           IN_TAG="${{ inputs.tag }}"
 
           VAR_IMAGE="${{ vars.IMAGE_NAME }}"
@@ -85,22 +79,21 @@ jobs:
             fi
             IMAGE_NAME="$VAR_IMAGE"
           fi
-          # Prefix with ghcr.io/<owner>/ if a bare name
+          # Prefix ghcr.io/<owner>/ if bare
           if [[ "$IMAGE_NAME" != ghcr.io/* ]]; then
             IMAGE_NAME="ghcr.io/${{ github.repository_owner }}/$IMAGE_NAME"
           fi
 
           # Container name: input > .env APP_NAME > default
-          BASE_NAME="${IN_NAME:-${APP_NAME:-pi_app}}"
-          CONTAINER_NAME="$BASE_NAME"   # no -dev/-prod suffix anymore
+          CONTAINER_NAME="${IN_NAME:-${APP_NAME:-pi_app}}"
 
-          # Ports: input > .env > default
+          # Ports:
           HOST_PORT_VAL="${IN_HOST:-${HOST_PORT:-8000}}"
-          CONT_PORT_VAL="${IN_CONT:-${APP_PORT:-8080}}"
+          CONT_PORT_VAL="${APP_PORT:-8080}"  # single source of truth from .env, fallback 8080
 
           # Validate numerics
           [[ "$HOST_PORT_VAL" =~ ^[0-9]+$ ]] || { echo "HOST_PORT must be numeric (got '$HOST_PORT_VAL')"; exit 1; }
-          [[ "$CONT_PORT_VAL" =~ ^[0-9]+$ ]] || { echo "CONTAINER_PORT must be numeric (got '$CONT_PORT_VAL')"; exit 1; }
+          [[ "$CONT_PORT_VAL" =~ ^[0-9]+$ ]] || { echo "APP_PORT must be numeric (got '$CONT_PORT_VAL')"; exit 1; }
 
           TAG="${IN_TAG:-latest}"
           FULL_IMAGE_REF="${IMAGE_NAME}:${TAG}"
