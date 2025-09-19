@@ -35,6 +35,11 @@ on:
         required: false
         type: string
         default: "latest"
+      extra-args:
+        description: "Additional Docker run arguments"
+        required: false
+        type: string
+        default: ""
 
 
 jobs:
@@ -130,9 +135,13 @@ jobs:
           FULL_IMAGE_REF="${IMAGE_NAME}:${TAG}"
 
           # Basic validation
-          [[ "$HOST_PORT_VAL" =~ ^[0-9]+$ ]] || { echo "HOST_PORT must be numeric"; exit 1; }
-          [[ "$CONT_PORT_VAL" =~ ^[0-9]+$ ]] || { echo "CONTAINER_PORT must be numeric"; exit 1; }
-
+          if [ -n "$HOST_PORT_VAL" ] && [ -n "$CONT_PORT_VAL" ]; then
+            [[ "$HOST_PORT_VAL" =~ ^[0-9]+$ ]] || { echo "HOST_PORT must be numeric"; exit 1; }
+            [[ "$CONT_PORT_VAL" =~ ^[0-9]+$ ]] || { echo "CONTAINER_PORT must be numeric"; exit 1; }
+          else
+          HOST_PORT_VAL=""
+          CONT_PORT_VAL=""
+          fi
           {
             echo "IMAGE_NAME=$IMAGE_NAME"
             echo "CONTAINER_NAME=$CONTAINER_NAME"
