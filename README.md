@@ -16,6 +16,8 @@ So to you use this template
 
  **1.the final model (.ONNX format) after model training and validation has to be made available to Github release** for deploying the model to Pi5.
 
+ **2.the Model directory (the directory name at Pi where the .ONNX model and its related files will be stored) must be defined in .env file of the project teamplate. Bu default it is set as opt/edge/models in .env**
+
 **2.the following Model directories must be present in Raspberry Pi opt/edge/models ,/opt/edge/models/models ,/opt/edge/models/manifests** - this step explained later.
 
 Please read the readme file under Model_dev section for specific points to keep in mind when you are trianing your model.
