@@ -9,7 +9,7 @@ on:
     inputs:
       model-repo:
         description: 'Source repo of Github Release where .ONXX model is present. Leave empty to pick the repo of this workflow'
-        required: false
+        required: true
         default: ''
       pi-proj-repo:
         description: 'Project directory at Pi end. Leave empty to pick the Project repo name'
@@ -159,7 +159,111 @@ jobs:
           echo "MODEL_PATH=$ASSET_NAME" >> $GITHUB_ENV
           echo "model_name=$ASSET_NAME" >> $GITHUB_OUTPUT
 
-      # ... (rest of the validate job steps remain the same - just showing the changed parts)
+      - name: Show file size (sanity)
+        shell: bash
+        run: |
+          BYTES=$(stat -c%s "$MODEL_PATH")
+          echo "Downloaded size: $BYTES bytes"
+          echo "Source: ${{ steps.repo-config.outputs.source_repo }}"
+
+      - name: Setup Python and install ONNX
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install onnx
+        run: pip install --quiet onnx
+
+      - name: Run ONNX checker (structure & ops)
+        shell: bash
+        run: |
+          python - << 'PY'
+          import os, onnx
+          p = os.environ["MODEL_PATH"]
+          m = onnx.load(p)
+          onnx.checker.check_model(m)
+          print("ONNX checker: OK")
+          for i in m.graph.input:
+            dims = [d.dim_value if d.HasField('dim_value') else None
+                    for d in i.type.tensor_type.shape.dim]
+            print("Input:", i.name, dims)
+          PY
+
+      - name: Extract opset & enforce static input shape
+        id: inspect
+        shell: bash
+        run: |
+          set -e
+          python - << 'PY'
+          import os, sys, onnx
+          p = os.environ["MODEL_PATH"]
+          m = onnx.load(p)
+
+          minv, maxv = 12, 17
+          if not m.opset_import:
+              print("No opset_import found"); sys.exit(1)
+          opset = m.opset_import[0].version
+          if not (minv <= opset <= maxv):
+              print(f"Opset {opset} outside allowed range {minv}-{maxv}")
+              sys.exit(1)
+
+          def dims_of(v):
+              return [d.dim_value if d.HasField('dim_value') else None
+                      for d in v.type.tensor_type.shape.dim]
+          inputs = {i.name: dims_of(i) for i in m.graph.input}
+          for name, dims in inputs.items():
+              if any(d in (None, 0) for d in dims):
+                  print(f"Dynamic/unknown dims in input {name}: {dims}")
+                  sys.exit(1)
+
+          first_dims = list(inputs.values())[0] if inputs else []
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write(f"opset={int(opset)}\n")
+              f.write("input_shape=" + "x".join(map(str, first_dims)) + "\n")
+          PY
+
+      - name: Compute sha256 (identity)
+        id: hash
+        shell: bash
+        run: |
+          SHA=$(sha256sum "$MODEL_PATH" | cut -d' ' -f1)
+          echo "sha256: $SHA"
+          echo "Source repo: ${{ steps.repo-config.outputs.source_repo }}"
+          echo "$SHA  $(basename "$MODEL_PATH")" > sha256.txt
+          echo "model_sha=$SHA" >> $GITHUB_OUTPUT
+          echo "short_sha=${SHA:0:12}" >> $GITHUB_OUTPUT
+
+      - name: UTC timestamp
+        id: utc
+        shell: bash
+        run: echo "utc_stamp=$(date -u +%Y%m%d-%H%M)" >> $GITHUB_OUTPUT
+
+      - name: Build manifest.json
+        shell: bash
+        run: |
+          cat > manifest.json << JSON
+          {
+            "model_id_sha256": "${{ steps.hash.outputs.model_sha }}",
+            "filename":        "${{ steps.download.outputs.model_name }}",
+            "created_at_utc":  "${{ steps.utc.outputs.utc_stamp }}",
+            "framework":       "onnx",
+            "opset":           ${{ steps.inspect.outputs.opset }},
+            "input_shape":     "${{ steps.inspect.outputs.input_shape }}",
+            "quantization":    "unknown",
+            "source_repo":     "${{ steps.repo-config.outputs.source_repo }}",
+            "source_release":  "${{ steps.rel.outputs.tag_name }}",
+            "notes":           "validated: onnx.checker + opset ${{ steps.inspect.outputs.opset }} + static input"
+          }
+          JSON
+          cat manifest.json
+
+      - name: Upload bundle as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: validated-model
+          path: |
+            ${{ env.MODEL_PATH }}
+            sha256.txt
+            manifest.json
 
   deliver:
     name: Deliver to Pi and flip current.onnx
@@ -222,7 +326,56 @@ jobs:
           test -f "$TARGET_BASE/deployments.log" || (echo "Deployments log missing"; exit 1)
           echo "✓ All project directories verified"
 
-      # ... (rest of the deliver job steps remain the same, just using the new target_base)
+      - name: Verify sha256 on Pi (integrity)
+        id: verify
+        shell: bash
+        run: |
+          set -e
+          FILE="$(find . -maxdepth 4 -type f -name '*.onnx' | head -n1)"
+          echo "File: $FILE"
+          echo "Source: ${{ needs.validate.outputs.source_repo }}"
+          SHA_LOCAL="$(sha256sum "$FILE" | cut -d' ' -f1)"
+          SHA_EXPECT="${{ needs.validate.outputs.model_sha }}"
+          echo "Local: $SHA_LOCAL"
+          echo "Expect: $SHA_EXPECT"
+          test "$SHA_LOCAL" = "$SHA_EXPECT" || (echo "SHA256 mismatch"; exit 1)
+          echo "ok=true" >> $GITHUB_OUTPUT
+
+      - name: Idempotency check (skip if already current)
+        id: idem
+        shell: bash
+        run: |
+          set -e
+          TARGET_BASE="${{ steps.setup-dirs.outputs.target_base }}"
+          EXPECT="${{ needs.validate.outputs.model_sha }}"
+          SOURCE_REPO="${{ needs.validate.outputs.source_repo }}"
+          MODEL_FILE="${{ needs.validate.outputs.model_name }}"
+          
+          if [ -L "$TARGET_BASE/current.onnx" ]; then
+            CUR="$(readlink -f "$TARGET_BASE/current.onnx")"
+            CUR_SHA="$(sha256sum "$CUR" | cut -d' ' -f1)"
+            echo "Current: $CUR_SHA"
+            echo "Expect:  $EXPECT"
+            echo "Source:  $SOURCE_REPO"
+            if [ "$CUR_SHA" = "$EXPECT" ]; then
+              echo "skip=true" >> $GITHUB_OUTPUT
+              echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) ALREADY-CURRENT model_id=$EXPECT source=$SOURCE_REPO" >> "$TARGET_BASE/deployments.log"
+              exit 0
+            fi
+          fi
+          echo "skip=false" >> $GITHUB_OUTPUT
+
+      - name: Check free disk space (need > 200MB)
+        if: steps.idem.outputs.skip != 'true'
+        shell: bash
+        run: |
+          TARGET_BASE="${{ steps.setup-dirs.outputs.target_base }}"
+          AVAIL_KB=$(df -Pk "$TARGET_BASE" | awk 'NR==2{print $4}')
+          REQ_KB=200000
+          echo "Available: ${AVAIL_KB} KB"
+          if [ "$AVAIL_KB" -lt "$REQ_KB" ]; then
+            echo "Not enough disk space for safe deploy"; exit 1
+          fi
 
       - name: Stage, move, and atomic switch
         if: steps.idem.outputs.skip != 'true'
@@ -275,7 +428,34 @@ jobs:
           echo "current.onnx -> $(readlink -f "$TARGET_BASE/current.onnx")"
           [ -L "$TARGET_BASE/previous.onnx" ] && echo "previous.onnx -> $(readlink -f "$TARGET_BASE/previous.onnx")" || echo "previous.onnx not set (first deploy)"
 
-      # ... (rest of the steps remain similar with updated paths)
+      - name: Retain last 10 models (prune older)
+        if: steps.idem.outputs.skip != 'true'
+        shell: bash
+        run: |
+          set -e
+          TARGET_BASE="${{ steps.setup-dirs.outputs.target_base }}"
+          MODELS_DIR="$TARGET_BASE/models"
+          cd "$MODELS_DIR" || exit 0
+          
+          # Get all model files, sorted by time (newest first)
+          ls -1t *.onnx > /tmp/models_all.txt 2>/dev/null || true
+          head -n 10 /tmp/models_all.txt > /tmp/keep.txt 2>/dev/null || true
+          tail -n +11 /tmp/models_all.txt > /tmp/cand_delete.txt 2>/dev/null || true
+
+          CUR="$(readlink -f "$TARGET_BASE/current.onnx")"
+          PREV="$(readlink -f "$TARGET_BASE/previous.onnx" 2>/dev/null || true)"
+
+          while read -r f; do
+            [ -z "$f" ] && continue
+            ABS="$MODELS_DIR/$f"
+            [ "$ABS" = "$CUR" ] && { echo "Keep (current): $f"; continue; }
+            [ -n "$PREV" ] && [ "$ABS" = "$PREV" ] && { echo "Keep (previous): $f"; continue; }
+            echo "Deleting old model: $f"
+            sudo rm -f -- "$ABS"
+            # Also delete corresponding manifest
+            MANIFEST_NAME="${f%.*}"  # Remove .onnx extension
+            sudo rm -f "$TARGET_BASE/manifests/$MANIFEST_NAME-*.json" 2>/dev/null || true
+          done < /tmp/cand_delete.txt
 
       - name: List project directory (for sanity)
         run: |
