@@ -24,11 +24,19 @@ on:
         required: false
         type: string
         default: "latest"
+
+      model-mount-dir:
+        description: "Model mount directory on Pi - leave blank to use /opt/edge/<repo_name>"
+        required: false
+        type: string
+        default: ""
+
       extra-args:
         description: "Additional Docker run arguments (e.g., --env KEY=VAL)"
         required: false
         type: string
         default: ""
+
 
 jobs:
   deploy-to-pi:
@@ -65,6 +73,7 @@ jobs:
           IN_NAME="${{ inputs['container-name'] }}"
           IN_HOST="${{ inputs['host-port'] }}"
           IN_TAG="${{ inputs.tag }}"
+          IN_MODEL_DIR="${{ inputs['model-mount-dir'] }}"
 
           VAR_IMAGE="${{ vars.IMAGE_NAME }}"
 
@@ -91,6 +100,14 @@ jobs:
           HOST_PORT_VAL="${IN_HOST:-${HOST_PORT:-8000}}"
           CONT_PORT_VAL="${APP_PORT:-8080}"  # single source of truth from .env, fallback 8080
 
+          # Model directory: input > default to /opt/edge/<repo_name>
+          if [ -n "$IN_MODEL_DIR" ]; then
+            MODEL_DIR="$IN_MODEL_DIR"
+          else
+            REPO_NAME="${{ github.event.repository.name }}"
+            MODEL_DIR="/opt/edge/${REPO_NAME}"
+          fi
+
           # Validate numerics
           [[ "$HOST_PORT_VAL" =~ ^[0-9]+$ ]] || { echo "HOST_PORT must be numeric (got '$HOST_PORT_VAL')"; exit 1; }
           [[ "$CONT_PORT_VAL" =~ ^[0-9]+$ ]] || { echo "APP_PORT must be numeric (got '$CONT_PORT_VAL')"; exit 1; }
@@ -105,6 +122,7 @@ jobs:
             echo "CONTAINER_PORT=$CONT_PORT_VAL"
             echo "TAG=$TAG"
             echo "FULL_IMAGE_REF=$FULL_IMAGE_REF"
+            echo "MODEL_DIR=$MODEL_DIR"
           } >> "$GITHUB_OUTPUT"
 
           {
@@ -116,6 +134,7 @@ jobs:
             echo "| Container name | \`${CONTAINER_NAME}\` |"
             echo "| Host port | \`${HOST_PORT_VAL}\` |"
             echo "| Container port | \`${CONT_PORT_VAL}\` |"
+            echo "| Model directory | \`${MODEL_DIR}\` |"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Log in to GitHub Container Registry
@@ -153,9 +172,10 @@ jobs:
       - name: Verify model mount directory exists on Pi
         shell: bash
         run: |
-          test -d /opt/edge/models || { echo "Missing /opt/edge/models"; exit 1; }
-          ls -l /opt/edge/models || true
-          readlink -f /opt/edge/models/current.onnx || echo "Note: current.onnx not set yet"
+          MODEL_DIR="${{ steps.resolve.outputs.MODEL_DIR }}"
+          test -d "$MODEL_DIR" || { echo "Missing model directory: $MODEL_DIR"; exit 1; }
+          ls -l "$MODEL_DIR" || true
+          readlink -f "$MODEL_DIR/current.onnx" || echo "Note: current.onnx not set yet in $MODEL_DIR"
 
       - name: Run new container
         shell: bash
@@ -172,18 +192,119 @@ jobs:
           docker run -d \
             --name "${{ steps.resolve.outputs.CONTAINER_NAME }}" \
             --restart unless-stopped \
-            -v /opt/edge/models:/opt/edge/models:ro \
-            -p ${{ steps.resolve.outputs.HOST_PORT }}:${{ steps.resolve.outputs.CONTAINER_PORT }} \
-            -l org.opencontainers.image.source=${{ github.repository }} \
-            -l org.opencontainers.image.revision=${{ github.sha }} \
+            -p "${{ steps.resolve.outputs.HOST_PORT }}:${{ steps.resolve.outputs.CONTAINER_PORT }}" \
+            -e MODEL_PATH="${{ steps.resolve.outputs.MODEL_DIR }}/current.onnx" \
+            -v "${{ steps.resolve.outputs.MODEL_DIR }}:${{ steps.resolve.outputs.MODEL_DIR }}:ro" \
             "${EXTRA_ARR[@]}" \
             "${{ steps.resolve.outputs.FULL_IMAGE_REF }}"
 
-      - name: Verify deployment
+      - name: Verify container is running
         shell: bash
         run: |
-          echo "Container status:"
-          docker ps --filter "name=${{ steps.resolve.outputs.CONTAINER_NAME }}"
-          echo ""
-          echo "Recent logs:"
-          docker logs --tail 50 "${{ steps.resolve.outputs.CONTAINER_NAME }}" || echo "Container might still be starting up..."
+          set -euo pipefail
+          CONTAINER_NAME="${{ steps.resolve.outputs.CONTAINER_NAME }}"
+          
+          # Wait a few seconds for container to start
+          sleep 5
+          
+          # Check if container is running
+          if docker ps --filter "name=${CONTAINER_NAME}" --filter "status=running" --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
+            echo "✅ Container ${CONTAINER_NAME} is running successfully"
+            docker ps --filter "name=${CONTAINER_NAME}" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+          else
+            echo "❌ Container ${CONTAINER_NAME} failed to start or is not running"
+            echo "Container status:"
+            docker ps -a --filter "name=${CONTAINER_NAME}" --format "table {{.Names}}\t{{.Status}}"
+            echo "Container logs:"
+            docker logs "${CONTAINER_NAME}" || echo "No logs available"
+            exit 1
+          fi
+
+      - name: Health check (optional)
+        shell: bash
+        run: |
+          set -euo pipefail
+          HOST_PORT="${{ steps.resolve.outputs.HOST_PORT }}"
+          CONTAINER_NAME="${{ steps.resolve.outputs.CONTAINER_NAME }}"
+          
+          echo "Performing health check on port ${HOST_PORT}..."
+          
+          # Wait for application to initialize
+          sleep 10
+          
+          # Try basic connectivity test (adjust endpoint as needed)
+          if curl -f -s --max-time 5 "http://localhost:${HOST_PORT}/health" > /dev/null 2>&1; then
+            echo "✅ Health check passed - application is responding"
+          elif curl -f -s --max-time 5 "http://localhost:${HOST_PORT}/" > /dev/null 2>&1; then
+            echo "✅ Basic connectivity check passed - root endpoint responding"
+          else
+            echo "⚠️  Health/connectivity check failed - this may be normal if no health endpoint exists"
+            echo "Application may still be starting up. Check logs:"
+            docker logs --tail 10 "${CONTAINER_NAME}"
+            echo "Note: This is not necessarily an error if your app doesn't have a health endpoint"
+          fi
+
+      - name: Cleanup old images
+        shell: bash
+        run: |
+          set -euo pipefail
+          IMAGE_NAME="${{ steps.resolve.outputs.IMAGE_NAME }}"
+          
+          echo "Cleaning up old images for ${IMAGE_NAME}..."
+          
+          # Get all images for this repository, sort by created date (newest first), skip first 3, remove the rest
+          OLD_IMAGES=$(docker images "${IMAGE_NAME}" --format "{{.ID}} {{.CreatedAt}}" | \
+            sort -k2 -r | tail -n +4 | awk '{print $1}' || true)
+          
+          if [ -n "$OLD_IMAGES" ]; then
+            echo "Removing old images: $OLD_IMAGES"
+            # shellcheck disable=SC2086
+            docker rmi $OLD_IMAGES || echo "Some images could not be removed (may be in use)"
+          else
+            echo "No old images to clean up"
+          fi
+
+      - name: Deployment summary
+        shell: bash
+        run: |
+          set -euo pipefail
+          
+          CONTAINER_NAME="${{ steps.resolve.outputs.CONTAINER_NAME }}"
+          FULL_IMAGE_REF="${{ steps.resolve.outputs.FULL_IMAGE_REF }}"
+          HOST_PORT="${{ steps.resolve.outputs.HOST_PORT }}"
+          CONTAINER_PORT="${{ steps.resolve.outputs.CONTAINER_PORT }}"
+          MODEL_DIR="${{ steps.resolve.outputs.MODEL_DIR }}"
+          
+          # Get container status
+          STATUS=$(docker inspect --format='{{.State.Status}}' "${CONTAINER_NAME}" 2>/dev/null || echo "unknown")
+          
+          {
+            echo "## 🚀 Deployment Summary"
+            echo ""
+            echo "| Parameter | Value |"
+            echo "|-----------|-------|"
+            echo "| **Image** | \`${FULL_IMAGE_REF}\` |"
+            echo "| **Container** | \`${CONTAINER_NAME}\` |"
+            echo "| **Port Mapping** | \`${HOST_PORT}:${CONTAINER_PORT}\` |"
+            echo "| **Model Path** | \`${MODEL_DIR}/current.onnx\` |"
+            echo "| **Status** | \`${STATUS}\` |"
+            echo ""
+            echo "### Container Details"
+            echo "\`\`\`"
+            docker ps --filter "name=${CONTAINER_NAME}" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}\t{{.Image}}" || true
+            echo "\`\`\`"
+            echo ""
+            if [ "$STATUS" = "running" ]; then
+              echo "✅ **Deployment successful!** Your application is running at http://localhost:${HOST_PORT}"
+            else
+              echo "❌ **Deployment issue detected.** Container status: ${STATUS}"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          
+          echo "=== Deployment Complete ==="
+          echo "✅ Image: ${FULL_IMAGE_REF}"
+          echo "✅ Container: ${CONTAINER_NAME}"
+          echo "✅ Port: ${HOST_PORT}:${CONTAINER_PORT}"
+          echo "✅ Model: ${MODEL_DIR}/current.onnx"
+          echo "✅ Status: ${STATUS}"
+          echo "=========================="
