@@ -9,7 +9,7 @@ on:
     inputs:
       model-repo:
         description: 'Source repo of Github Release where .ONXX model is present. Leave empty to pick the repo of this workflow'
-        required: true
+        required: false
         default: ''
       pi-proj-repo:
         description: 'Project directory at Pi end. Leave empty to pick the Project repo name'
