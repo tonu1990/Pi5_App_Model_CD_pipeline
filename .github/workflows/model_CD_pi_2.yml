@@ -1,10 +1,7 @@
 name: Model CD - Ship latest ONNX model Pi
 
 on:
-  # Auto-run when a new Release is published in ANY repository
-  release:
-    types: [published]
-  # Also allow manual runs with configurable source repo
+  # Allow manual runs with configurable source repo
   workflow_dispatch:
     inputs:
       model-repo:
