@@ -1,7 +1,6 @@
-name: Model CD - Ship latest ONNX model Pi - Version 2
+name: Model CD - Ship latest ONNX model from any Github repo Release to Pi - Version 2
 
 on:
- 
   # Manual workflow run with configurable source repo
   workflow_dispatch:
     inputs:
