@@ -1,4 +1,4 @@
-name: Deploy GUI launcher Icon to Pi
+name: Deploy GUI launcher to Pi
 
 on:
   workflow_dispatch:
@@ -28,7 +28,7 @@ on:
         required: true
         default: "true"
       use_software_gl:
-        description: "Force software GL (set to false if you pass /dev/dri and want GL)"
+        description: "Force software GL (set false if you pass /dev/dri and want GL)"
         required: true
         default: "true"
       pre_pull:
@@ -43,18 +43,20 @@ jobs:
     steps:
       - name: Resolve user and paths
         id: vars
+        shell: bash
         run: |
           set -euo pipefail
 
           TARGET_USER="${{ github.event.inputs.target_user }}"
+
+          # Resolve home directory of target user
           USER_HOME="$(getent passwd "$TARGET_USER" | cut -d: -f6 || true)"
           if [ -z "$USER_HOME" ]; then
             echo "Could not resolve home for user ${TARGET_USER}" >&2
             exit 1
           fi
 
-          # Where we will install the launcher script
-          # Prefer /usr/local/bin (requires sudo); fall back to $HOME/.local/bin
+          # Prefer installing script to /usr/local/bin if sudo is available
           if sudo -n true 2>/dev/null; then
             SCRIPT_PATH="/usr/local/bin/${{ github.event.inputs.container_name }}.sh"
             USE_SUDO="yes"
@@ -70,12 +72,14 @@ jobs:
 
       - name: (Optional) docker pull image
         if: ${{ github.event.inputs.pre_pull == 'true' }}
+        shell: bash
         run: |
           set -euo pipefail
           IMAGE="${{ github.event.inputs.image }}"
           /usr/bin/docker pull "$IMAGE"
 
       - name: Install launcher script
+        shell: bash
         run: |
           set -euo pipefail
 
@@ -110,7 +114,6 @@ jobs:
           # Allow this user to talk to X (harmless if already set)
           "$XHOST" +SI:localuser:$("$WHOAMI") >/dev/null 2>&1 || true
 
-          # Common docker args
           DOCKER_ARGS=(
             --rm
             --name "$CONTAINER_NAME"
@@ -120,7 +123,7 @@ jobs:
             -e XDG_CACHE_HOME=/tmp/.cache
             -e XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR"
             -e QT_QPA_PLATFORM=xcb
-            -e QT_X11_NO_MITSHM=1
+            -e QT_XI1_NO_MITSHM=1
             -v /tmp/.X11-unix:/tmp/.X11-unix:ro
             --device "$DEVICE:$DEVICE"
             --group-add video
@@ -131,7 +134,7 @@ jobs:
             DOCKER_ARGS+=(-e LIBGL_ALWAYS_SOFTWARE=1)
           fi
 
-          # Run without a TTY (GUI app), log to file for debugging
+          # Run without TTY (GUI app), log to file for debugging
           exec "$DOCKER" run "${DOCKER_ARGS[@]}" "$IMAGE" >>"$LOG" 2>&1
           EOSH
 
@@ -141,20 +144,21 @@ jobs:
           sed -i "s|{{CAM_DEVICE}}|$CAM_DEVICE|g" "$TMP_SCRIPT"
           sed -i "s|{{USE_SOFT_GL}}|$USE_SOFT_GL|g" "$TMP_SCRIPT"
 
+          # Install script
           if [ "$USE_SUDO" = "yes" ]; then
             sudo install -m 0755 "$TMP_SCRIPT" "$SCRIPT_PATH"
           else
             install -m 0755 "$TMP_SCRIPT" "$SCRIPT_PATH"
           fi
+          rm -f "$TMP_SCRIPT"
 
-          # Ensure the target user owns the file if we installed under their home
+          # Ensure target user can execute (if under their home)
           if [ "$USE_SUDO" = "no" ]; then
             chown "${TARGET_USER}:${TARGET_USER}" "$SCRIPT_PATH"
           fi
 
-          rm -f "$TMP_SCRIPT"
-
       - name: Install menu entry (.desktop)
+        shell: bash
         run: |
           set -euo pipefail
           TARGET_USER="${{ github.event.inputs.target_user }}"
@@ -179,14 +183,18 @@ jobs:
           StartupNotify=false
           EOF
 
-          chown -R "${TARGET_USER}:${TARGET_USER}" "$USER_APPS_DIR"
+          # Normalize line endings; make executable; fix ownership
+          sed -i 's/\r$//' "$DESKTOP_FILE" || true
           chmod +x "$DESKTOP_FILE"
+          chown -R "${TARGET_USER}:${TARGET_USER}" "$USER_APPS_DIR"
 
           # Refresh the menu cache (best-effort)
           command -v xdg-desktop-menu >/dev/null && xdg-desktop-menu forceupdate || true
+          command -v update-desktop-database >/dev/null && update-desktop-database || true
 
-      - name: (Optional) Place Desktop icon
+      - name: Place Desktop icon (.desktop)
         if: ${{ github.event.inputs.create_desktop_icon == 'true' }}
+        shell: bash
         run: |
           set -euo pipefail
           TARGET_USER="${{ github.event.inputs.target_user }}"
@@ -199,23 +207,35 @@ jobs:
           mkdir -p "$USER_HOME/Desktop"
           cp -f "$SRC" "$DST"
 
-          chown -R "${TARGET_USER}:${TARGET_USER}" "$USER_HOME/Desktop"
+          # Make launcher executable and mark as trusted where supported
+          sed -i 's/\r$//' "$DST" || true
           chmod +x "$DST"
-
-      - name: Summary
-        run: |
-          echo "Deployed launcher:"
-          echo "  Script:  ${{ steps.vars.outputs.SCRIPT_PATH }}"
-          echo "  Menu:    $HOME/.local/share/applications/${{ github.event.inputs.container_name }}.desktop (owned by ${{ github.event.inputs.target_user }})"
-          if [ "${{ github.event.inputs.create_desktop_icon }}" = "true" ]; then
-            echo "  Desktop: ~/Desktop/${{ github.event.inputs.app_name }}.desktop"
+          if command -v gio >/dev/null 2>&1; then
+            gio set "$DST" "metadata::trusted" true || true
           fi
 
+          chown -R "${TARGET_USER}:${TARGET_USER}" "$USER_HOME/Desktop"
+
+      - name: Cleanup any script on Desktop (avoid “execute/open?” prompt)
+        shell: bash
+        run: |
+          set -euo pipefail
+          USER_HOME="${{ steps.vars.outputs.USER_HOME }}"
+          CONTAINER_NAME="${{ github.event.inputs.container_name }}"
+          APP_NAME="${{ github.event.inputs.app_name }}"
+
+          rm -f "$USER_HOME/Desktop/${CONTAINER_NAME}.sh" \
+                "$USER_HOME/Desktop/${APP_NAME}.sh" || true
+
+      - name: Summary
+        shell: bash
+        run: |
+          echo "Launcher deployed for image: ${{ github.event.inputs.image }}"
+          echo "User: ${{ github.event.inputs.target_user }}"
+          echo "Script:  ${{ steps.vars.outputs.SCRIPT_PATH }}"
+          echo "Menu:    ~/.local/share/applications/${{ github.event.inputs.container_name }}.desktop"
+          if [ "${{ github.event.inputs.create_desktop_icon }}" = "true" ]; then
+            echo "Desktop: ~/Desktop/${{ github.event.inputs.app_name }}.desktop"
+          fi
           echo
-          echo "Next steps:"
-          echo "  On the Pi as user ${{ github.event.inputs.target_user }}, open the Applications menu and click '${{ github.event.inputs.app_name }}',"
-          echo "  or double-click the Desktop icon (if created)."
-          echo
-          echo "Troubleshooting:"
-          echo "  - If nothing happens when clicking, check /tmp/${{ github.event.inputs.container_name }}..log"
-          echo "  - If the script was installed outside /usr/local/bin, verify Exec= path in the .desktop file."
+          echo "Click the '${{ github.event.inputs.app_name }}' icon to launch the app."
