@@ -1,4 +1,4 @@
-name: Deploy GUI launcher to Pi
+name: Deploy GUI launcher to Pi (with Uninstall)
 
 on:
   workflow_dispatch:
@@ -14,7 +14,7 @@ on:
         type: string
         default: "latest"
       container-name:
-        description: "Name for menu display (Docker name derives from a safe slug)"
+        description: "Name for menu/desktop display (Docker name derives from a safe slug)"
         required: false
         type: string
         default: "EdgeAI_Pi5"
@@ -45,10 +45,7 @@ jobs:
             exit 1
           fi
 
-          # Build final image reference:
-          # 1) If digest present -> use as-is
-          # 2) Else if tag already present -> use as-is
-          # 3) Else append :$TAG
+          # Final image reference
           if [[ "$IMAGE_NAME" == *@sha256:* ]]; then
             IMAGE_REF="$IMAGE_NAME"
           elif [[ "$IMAGE_NAME" =~ :[^/]+$ ]]; then
@@ -57,35 +54,42 @@ jobs:
             IMAGE_REF="${IMAGE_NAME}:${TAG:-latest}"
           fi
 
-          # Display name (menu label) = as provided (fallback to EdgeAI_Pi5)
+          # Menu label (display name)
           DISPLAY_NAME="${CN_RAW:-EdgeAI_Pi5}"
 
-          # Safe slug for docker --name and filenames: lowercase, spaces->-, drop invalid chars
+          # Safe slug for docker --name and filenames
           SLUG="$(printf '%s' "$DISPLAY_NAME" \
             | tr '[:upper:]' '[:lower:]' \
             | sed -E 's/[[:space:]]+/-/g; s/[^a-z0-9._-]//g')"
-          if [[ -z "$SLUG" ]]; then SLUG="edgeai_pi5"; fi
+          [[ -n "$SLUG" ]] || SLUG="edgeai_pi5"
 
           # Paths
           SCRIPT_PATH="/usr/local/bin/${SLUG}.sh"
           DESKTOP_SYS="/usr/share/applications/${SLUG}.desktop"
+          UN_SCRIPT_PATH="/usr/local/sbin/${SLUG}_uninstall.sh"
+          UN_DESKTOP_SYS="/usr/share/applications/${SLUG}_uninstall.desktop"
 
           echo "IMAGE_REF=$IMAGE_REF"            >> "$GITHUB_OUTPUT"
           echo "DISPLAY_NAME=$DISPLAY_NAME"      >> "$GITHUB_OUTPUT"
           echo "SLUG=$SLUG"                      >> "$GITHUB_OUTPUT"
           echo "SCRIPT_PATH=$SCRIPT_PATH"        >> "$GITHUB_OUTPUT"
           echo "DESKTOP_SYS=$DESKTOP_SYS"        >> "$GITHUB_OUTPUT"
+          echo "UN_SCRIPT_PATH=$UN_SCRIPT_PATH"  >> "$GITHUB_OUTPUT"
+          echo "UN_DESKTOP_SYS=$UN_DESKTOP_SYS"  >> "$GITHUB_OUTPUT"
           echo "EXTRA_ARGS=$EXTRA_ARGS"          >> "$GITHUB_OUTPUT"
 
-      - name: Require sudo
+      - name: Require sudo and install GUI helpers
         shell: bash
         run: |
           if ! sudo -n true 2>/dev/null; then
-            echo "This workflow needs passwordless sudo on the self-hosted runner to write system paths." >&2
+            echo "Needs passwordless sudo on the runner to write system paths." >&2
             exit 1
           fi
+          # Ensure zenity (GUI prompts) and policykit (pkexec) exist
+          sudo apt-get update -y
+          sudo apt-get install -y zenity policykit-1 xdg-utils || true
 
-      - name: Pre-pull image (for faster first launch)
+      - name: Pre-pull image (faster first launch)
         shell: bash
         run: |
           set -euo pipefail
@@ -106,138 +110,3 @@ jobs:
           set -euo pipefail
 
           DOCKER=/usr/bin/docker
-          XHOST=/usr/bin/xhost
-          ID=/usr/bin/id
-          WHOAMI=/usr/bin/whoami
-
-          IMAGE="__IMAGE__"
-          CONTAINER_NAME="__SLUG__"
-          LOG="/tmp/${CONTAINER_NAME}.log"
-
-          # Determine camera device (env CAM_DEVICE wins; else /dev/video0; else first available)
-          if [[ -n "${CAM_DEVICE:-}" ]]; then
-            DEVICE="$CAM_DEVICE"
-          elif [[ -e /dev/video0 ]]; then
-            DEVICE="/dev/video0"
-          else
-            DEVICE="$(ls -1 /dev/video* 2>/dev/null | head -n1 || true)"
-          fi
-          if [[ -z "${DEVICE:-}" ]]; then
-            echo "No /dev/video* device found" >> "$LOG"
-            exit 1
-          fi
-
-          # Writable runtime/cache dirs for GUI stack
-          export XDG_RUNTIME_DIR="/tmp/runtime-$("$ID" -u)"
-          mkdir -p "$XDG_RUNTIME_DIR" /tmp/.cache
-
-          # Allow X access
-          "$XHOST" +SI:localuser:$("$WHOAMI") >/dev/null 2>&1 || true
-
-          # Default: software GL (safe on most Pis). Override via extra args if desired.
-          DOCKER_ARGS=(
-            --rm
-            --name "$CONTAINER_NAME"
-            --user "$("$ID" -u):$("$ID" -g)"
-            -e DISPLAY="${DISPLAY:-:0}"
-            -e HOME=/tmp
-            -e XDG_CACHE_HOME=/tmp/.cache
-            -e XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR"
-            -e QT_QPA_PLATFORM=xcb
-            -e QT_X11_NO_MITSHM=1
-            -e LIBGL_ALWAYS_SOFTWARE=1
-            -v /tmp/.X11-unix:/tmp/.X11-unix:ro
-            --device "$DEVICE:$DEVICE"
-            --group-add video
-          )
-
-          # Append user-provided extra args (last-wins if options collide)
-          # shellcheck disable=SC2086
-          exec "$DOCKER" run "${DOCKER_ARGS[@]}" __EXTRA_ARGS__ "$IMAGE" >>"$LOG" 2>&1
-          EOSH
-
-          sed -i "s|__IMAGE__|$IMAGE|g" "$TMP_SCRIPT"
-          sed -i "s|__SLUG__|$SLUG|g" "$TMP_SCRIPT"
-          sed -i "s|__EXTRA_ARGS__|$EXTRA_ARGS|g" "$TMP_SCRIPT"
-
-          sudo install -m 0755 "$TMP_SCRIPT" "$SCRIPT_PATH"
-          rm -f "$TMP_SCRIPT"
-
-      - name: Install system-wide menu entry (/usr/share/applications/<slug>.desktop)
-        shell: bash
-        run: |
-          set -euo pipefail
-          DESKTOP_SYS="${{ steps.vars.outputs.DESKTOP_SYS }}"
-          SCRIPT_PATH="${{ steps.vars.outputs.SCRIPT_PATH }}"
-          DISPLAY_NAME="${{ steps.vars.outputs.DISPLAY_NAME }}"
-
-          TMP_DESKTOP="$(mktemp)"
-          cat > "$TMP_DESKTOP" <<EOF
-          [Desktop Entry]
-          Type=Application
-          Name=${DISPLAY_NAME}
-          Comment=Launch ${DISPLAY_NAME}
-          Exec=${SCRIPT_PATH}
-          Icon=utilities-camera
-          Terminal=false
-          Categories=Graphics;Video;
-          StartupNotify=false
-          EOF
-
-          sed -i 's/\r$//' "$TMP_DESKTOP" || true
-          sudo install -m 0755 "$TMP_DESKTOP" "$DESKTOP_SYS"
-          rm -f "$TMP_DESKTOP"
-
-          # Refresh menu caches (best-effort)
-          command -v xdg-desktop-menu >/dev/null && xdg-desktop-menu forceupdate || true
-          command -v update-desktop-database >/dev/null && sudo update-desktop-database || true
-
-      - name: Best-effort place a Desktop icon for the active GUI user
-        shell: bash
-        run: |
-          set -euo pipefail
-          DESKTOP_SYS="${{ steps.vars.outputs.DESKTOP_SYS }}"
-          DISPLAY_NAME="${{ steps.vars.outputs.DISPLAY_NAME }}"
-
-          # Detect active GUI user (seat0) -> fallback to who -> fallback to SUDO_USER
-          active_user="$(
-            loginctl list-sessions --no-legend 2>/dev/null \
-              | awk '/seat0/ {print $1}' \
-              | xargs -r -I{} loginctl show-session {} -p Name -p Active 2>/dev/null \
-              | awk -F= '/^Name=/{u=$2} /^Active=yes$/{print u; exit}'
-          )"
-          : "${active_user:=$(who | awk '$2 ~ /(:0|tty7)/{print $1; exit}')}"
-          : "${active_user:=${SUDO_USER:-}}"
-
-          if [[ -z "$active_user" ]]; then
-            echo "No active GUI user detected; skipping Desktop icon."
-            exit 0
-          fi
-
-          user_home="$(getent passwd "$active_user" | cut -d: -f6)"
-          if [[ -z "$user_home" || ! -d "$user_home" ]]; then
-            echo "Could not resolve home for $active_user; skipping Desktop icon."
-            exit 0
-          fi
-
-          mkdir -p "$user_home/Desktop"
-          dst="$user_home/Desktop/${DISPLAY_NAME}.desktop"
-          sudo cp -f "$DESKTOP_SYS" "$dst"
-          sudo chown "$active_user:$active_user" "$dst"
-          sudo chmod +x "$dst"
-          if command -v gio >/dev/null 2>&1; then
-            sudo -u "$active_user" gio set "$dst" "metadata::trusted" true || true
-          fi
-
-      - name: Summary
-        shell: bash
-        run: |
-          echo "Image:          ${{ steps.vars.outputs.IMAGE_REF }}"
-          echo "Container slug: ${{ steps.vars.outputs.SLUG }}"
-          echo "Launcher:       ${{ steps.vars.outputs.SCRIPT_PATH }}"
-          echo "Menu entry:     ${{ steps.vars.outputs.DESKTOP_SYS }}"
-          echo
-          echo "Click the '${{ steps.vars.outputs.DISPLAY_NAME }}' icon in the Applications menu (and Desktop if present) to launch."
-          echo "Container logs (on click): /tmp/${{ steps.vars.outputs.SLUG }}.log"
-          echo
-          echo "Tip: To enable hardware GL later, pass via 'extra-args': --device /dev/dri:/dev/dri --group-add render"
