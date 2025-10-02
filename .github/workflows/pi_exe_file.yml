@@ -54,16 +54,15 @@ jobs:
             IMAGE_REF="${IMAGE_NAME}:${TAG:-latest}"
           fi
 
-          # Menu label (display name)
+          # Menu/desktop display name
           DISPLAY_NAME="${CN_RAW:-EdgeAI_Pi5}"
 
-          # Safe slug for docker --name and filenames
+          # Docker/filename-safe slug (lowercase, spaces->-, only [a-z0-9._-])
           SLUG="$(printf '%s' "$DISPLAY_NAME" \
             | tr '[:upper:]' '[:lower:]' \
             | sed -E 's/[[:space:]]+/-/g; s/[^a-z0-9._-]//g')"
           [[ -n "$SLUG" ]] || SLUG="edgeai_pi5"
 
-          # Paths
           SCRIPT_PATH="/usr/local/bin/${SLUG}.sh"
           DESKTOP_SYS="/usr/share/applications/${SLUG}.desktop"
           UN_SCRIPT_PATH="/usr/local/sbin/${SLUG}_uninstall.sh"
@@ -85,7 +84,7 @@ jobs:
             echo "Needs passwordless sudo on the runner to write system paths." >&2
             exit 1
           fi
-          # Ensure zenity (GUI prompts) and policykit (pkexec) exist
+          # Ensure zenity (GUI prompts), policykit (pkexec), and xdg-utils
           sudo apt-get update -y
           sudo apt-get install -y zenity policykit-1 xdg-utils || true
 
@@ -110,3 +109,242 @@ jobs:
           set -euo pipefail
 
           DOCKER=/usr/bin/docker
+          XHOST=/usr/bin/xhost
+          ID=/usr/bin/id
+          WHOAMI=/usr/bin/whoami
+
+          IMAGE="__IMAGE__"
+          CONTAINER_NAME="__SLUG__"
+          LOG="/tmp/${CONTAINER_NAME}.log"
+
+          # Determine camera device
+          if [[ -n "${CAM_DEVICE:-}" ]]; then
+            DEVICE="$CAM_DEVICE"
+          elif [[ -e /dev/video0 ]]; then
+            DEVICE="/dev/video0"
+          else
+            DEVICE="$(ls -1 /dev/video* 2>/dev/null | head -n1 || true)"
+          fi
+          if [[ -z "${DEVICE:-}" ]]; then
+            echo "No /dev/video* device found" >> "$LOG"
+            exit 1
+          fi
+
+          # Writable runtime/cache dirs
+          export XDG_RUNTIME_DIR="/tmp/runtime-$("$ID" -u)"
+          mkdir -p "$XDG_RUNTIME_DIR" /tmp/.cache
+
+          # Allow X access
+          "$XHOST" +SI:localuser:$("$WHOAMI") >/dev/null 2>&1 || true
+
+          DOCKER_ARGS=(
+            --rm
+            --name "$CONTAINER_NAME"
+            --user "$("$ID" -u):$("$ID" -g)"
+            -e DISPLAY="${DISPLAY:-:0}"
+            -e HOME=/tmp
+            -e XDG_CACHE_HOME=/tmp/.cache
+            -e XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR"
+            -e QT_QPA_PLATFORM=xcb
+            -e QT_X11_NO_MITSHM=1
+            -e LIBGL_ALWAYS_SOFTWARE=1
+            -v /tmp/.X11-unix:/tmp/.X11-unix:ro
+            --device "$DEVICE:$DEVICE"
+            --group-add video
+          )
+
+          # Extra args appended (last-wins if options collide)
+          exec "$DOCKER" run "${DOCKER_ARGS[@]}" __EXTRA_ARGS__ "$IMAGE" >>"$LOG" 2>&1
+          EOSH
+
+          sed -i "s|__IMAGE__|$IMAGE|g" "$TMP_SCRIPT"
+          sed -i "s|__SLUG__|$SLUG|g" "$TMP_SCRIPT"
+          sed -i "s|__EXTRA_ARGS__|$EXTRA_ARGS|g" "$TMP_SCRIPT"
+
+          sudo install -m 0755 "$TMP_SCRIPT" "$SCRIPT_PATH"
+          rm -f "$TMP_SCRIPT"
+
+      - name: Install system menu entry (/usr/share/applications/<slug>.desktop)
+        shell: bash
+        run: |
+          set -euo pipefail
+          DESKTOP_SYS="${{ steps.vars.outputs.DESKTOP_SYS }}"
+          SCRIPT_PATH="${{ steps.vars.outputs.SCRIPT_PATH }}"
+          DISPLAY_NAME="${{ steps.vars.outputs.DISPLAY_NAME }}"
+
+          TMP_DESKTOP="$(mktemp)"
+          cat > "$TMP_DESKTOP" <<EOF
+          [Desktop Entry]
+          Type=Application
+          Name=${DISPLAY_NAME}
+          Comment=Launch ${DISPLAY_NAME}
+          Exec=${SCRIPT_PATH}
+          Icon=utilities-camera
+          Terminal=false
+          Categories=Graphics;Video;
+          StartupNotify=false
+          EOF
+
+          sed -i 's/\r$//' "$TMP_DESKTOP" || true
+          sudo install -m 0755 "$TMP_DESKTOP" "$DESKTOP_SYS"
+          rm -f "$TMP_DESKTOP"
+
+          command -v xdg-desktop-menu >/dev/null && xdg-desktop-menu forceupdate || true
+          command -v update-desktop-database >/dev/null && sudo update-desktop-database || true
+
+      - name: Copy Desktop icon to ALL user desktops (best-effort)
+        shell: bash
+        run: |
+          set -euo pipefail
+          DESKTOP_SYS="${{ steps.vars.outputs.DESKTOP_SYS }}"
+          DISPLAY_NAME="${{ steps.vars.outputs.DISPLAY_NAME }}"
+
+          for u in $(getent passwd | awk -F: '$3>=1000 && $3<65000 {print $1}'); do
+            home="$(getent passwd "$u" | cut -d: -f6)"
+            [ -d "$home" ] || continue
+            mkdir -p "$home/Desktop"
+            dst="$home/Desktop/${DISPLAY_NAME}.desktop"
+            sudo cp -f "$DESKTOP_SYS" "$dst"
+            sudo chown "$u:$u" "$dst"
+            sudo chmod +x "$dst"
+            if command -v gio >/dev/null 2>&1; then
+              sudo -u "$u" gio set "$dst" "metadata::trusted" true || true
+            fi
+            echo "Placed desktop icon for user $u at $dst"
+          done
+
+      - name: Install UNINSTALL helper (/usr/local/sbin/<slug>_uninstall.sh)
+        shell: bash
+        run: |
+          set -euo pipefail
+          SLUG="${{ steps.vars.outputs.SLUG }}"
+          DISPLAY_NAME="${{ steps.vars.outputs.DISPLAY_NAME }}"
+          IMAGE_REF="${{ steps.vars.outputs.IMAGE_REF }}"
+
+          UN_SCRIPT_PATH="${{ steps.vars.outputs.UN_SCRIPT_PATH }}"
+          TMP_UN="$(mktemp)"
+          cat > "$TMP_UN" << 'EOSH'
+          #!/usr/bin/env bash
+          set -euo pipefail
+
+          SLUG="__SLUG__"
+          DISPLAY_NAME="__DISPLAY_NAME__"
+          IMAGE_REF="__IMAGE_REF__"
+
+          say_gui() {
+            if command -v zenity >/dev/null 2>&1; then
+              zenity --info --title="Uninstall ${DISPLAY_NAME}" --text="$1"
+            else
+              echo "$1"
+            fi
+          }
+
+          ask_remove_image() {
+            if command -v zenity >/dev/null 2>&1; then
+              zenity --question --title="Uninstall ${DISPLAY_NAME}" \
+                --text="Do you also want to remove the Docker image?\n\n${IMAGE_REF}" \
+                --ok-label="Remove image" --cancel-label="Keep image"
+              return $?
+            else
+              read -r -p "Remove Docker image ${IMAGE_REF}? [y/N] " ans
+              [[ "$ans" =~ ^[Yy]$ ]]
+              return $?
+            fi
+          }
+
+          # Stop/remove container (best-effort)
+          /usr/bin/docker stop "$SLUG" >/dev/null 2>&1 || true
+          /usr/bin/docker rm -f "$SLUG" >/dev/null 2>&1 || true
+
+          # Remove launcher + system menu entry
+          rm -f "/usr/local/bin/${SLUG}.sh" || true
+          rm -f "/usr/share/applications/${SLUG}.desktop" || true
+
+          # Remove desktop icons and per-user menu entries for all real users
+          for u in $(getent passwd | awk -F: '$3>=1000 && $3<65000 {print $1}'); do
+            home="$(getent passwd "$u" | cut -d: -f6)"
+            [ -d "$home" ] || continue
+            rm -f "$home/Desktop/${DISPLAY_NAME}.desktop" || true
+            rm -f "$home/Desktop/${DISPLAY_NAME}_uninstall.desktop" || true
+            rm -f "$home/.local/share/applications/${SLUG}.desktop" || true
+          done
+
+          # Remove uninstall menu entry and logs
+          rm -f "/usr/share/applications/${SLUG}_uninstall.desktop" || true
+          rm -f "/tmp/${SLUG}.log" || true
+
+          # Ask about removing the image
+          if ask_remove_image; then
+            /usr/bin/docker rmi "${IMAGE_REF}" >/dev/null 2>&1 || true
+          fi
+
+          say_gui "Uninstall complete."
+          EOSH
+
+          sed -i "s|__SLUG__|$SLUG|g" "$TMP_UN"
+          sed -i "s|__DISPLAY_NAME__|$DISPLAY_NAME|g" "$TMP_UN"
+          sed -i "s|__IMAGE_REF__|$IMAGE_REF|g" "$TMP_UN"
+
+          sudo install -m 0755 "$TMP_UN" "$UN_SCRIPT_PATH"
+          rm -f "$TMP_UN"
+
+      - name: Install UNINSTALL menu entry (/usr/share/applications/<slug>_uninstall.desktop)
+        shell: bash
+        run: |
+          set -euo pipefail
+          UN_SCRIPT_PATH="${{ steps.vars.outputs.UN_SCRIPT_PATH }}"
+          UN_DESKTOP_SYS="${{ steps.vars.outputs.UN_DESKTOP_SYS }}"
+          DISPLAY_NAME="${{ steps.vars.outputs.DISPLAY_NAME }}"
+
+          TMP_DU="$(mktemp)"
+          cat > "$TMP_DU" <<EOF
+          [Desktop Entry]
+          Type=Application
+          Name=${DISPLAY_NAME}_uninstall
+          Comment=Uninstall ${DISPLAY_NAME}
+          Exec=pkexec ${UN_SCRIPT_PATH}
+          Icon=utilities-terminal
+          Terminal=false
+          Categories=Settings;Utility;
+          StartupNotify=true
+          EOF
+
+          sed -i 's/\r$//' "$TMP_DU" || true
+          sudo install -m 0755 "$TMP_DU" "$UN_DESKTOP_SYS"
+          rm -f "$TMP_DU"
+
+          command -v xdg-desktop-menu >/dev/null && xdg-desktop-menu forceupdate || true
+          command -v update-desktop-database >/dev/null && sudo update-desktop-database || true
+
+      - name: Copy UNINSTALL Desktop icon to ALL user desktops (best-effort)
+        shell: bash
+        run: |
+          set -euo pipefail
+          UN_DESKTOP_SYS="${{ steps.vars.outputs.UN_DESKTOP_SYS }}"
+          DISPLAY_NAME="${{ steps.vars.outputs.DISPLAY_NAME }}"
+
+          for u in $(getent passwd | awk -F: '$3>=1000 && $3<65000 {print $1}'); do
+            home="$(getent passwd "$u" | cut -d: -f6)"
+            [ -d "$home" ] || continue
+            mkdir -p "$home/Desktop"
+            dst="$home/Desktop/${DISPLAY_NAME}_uninstall.desktop"
+            sudo cp -f "$UN_DESKTOP_SYS" "$dst"
+            sudo chown "$u:$u" "$dst"
+            sudo chmod +x "$dst"
+            if command -v gio >/dev/null 2>&1; then
+              sudo -u "$u" gio set "$dst" "metadata::trusted" true || true
+            fi
+            echo "Placed uninstall desktop icon for user $u at $dst"
+          done
+
+      - name: Summary
+        shell: bash
+        run: |
+          echo "Installed:"
+          echo "  Launcher script : ${{ steps.vars.outputs.SCRIPT_PATH }}"
+          echo "  Menu entry      : ${{ steps.vars.outputs.DESKTOP_SYS }}"
+          echo "  Uninstall script: ${{ steps.vars.outputs.UN_SCRIPT_PATH }}"
+          echo "  Uninstall menu  : ${{ steps.vars.outputs.UN_DESKTOP_SYS }}"
+          echo
+          echo "Desktop icons were copied to all real users under /home (best-effort)."
+          echo "Click '${{ steps.vars.outputs.DISPLAY_NAME }}' to run, or '${{ steps.vars.outputs.DISPLAY_NAME }}_uninstall' to remove."
