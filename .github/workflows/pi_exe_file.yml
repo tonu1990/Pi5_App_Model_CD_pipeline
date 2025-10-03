@@ -1,30 +1,25 @@
-name: Deploy GUI launcher to Pi (with Uninstall + Model Mount)
+name: Deploy GUI launcher to Pi (Uninstall + Model Mount)
 
 on:
   workflow_dispatch:
     inputs:
       image-name:
-        description: "Application image name (GHCR repo, e.g. ghcr.io/tonu1990/gstreamer_demo)"
+        description: "GHCR image (e.g. ghcr.io/owner/app)"
         required: true
         type: string
         default: ""
       tag:
-        description: "Image tag (used only if image-name has no tag/digest)"
+        description: "Image tag (ignored if image-name already has tag/digest)"
         required: false
         type: string
         default: "latest"
       container-name:
-        description: "Name for menu/desktop display (Docker name derives from a safe slug)"
+        description: "Menu/desktop display name (Docker name uses a safe slug)"
         required: false
         type: string
         default: "EdgeAI_Pi5"
-      pi-proj-repo:
-        description: "Project folder name under /opt/edge (defaults to GitHub repo name)"
-        required: false
-        type: string
-        default: ""
       model-mount-dir:
-        description: "Host model base directory; leave blank to use /opt/edge/<pi-proj-repo-or-repo_name>"
+        description: "Model mount directory on Pi - leave blank to use /opt/edge/<repo_name>"
         required: false
         type: string
         default: ""
@@ -39,7 +34,7 @@ jobs:
     runs-on: [self-hosted, pi5, app_model_cd]
 
     steps:
-      - name: Resolve inputs, image ref, names, and model dir
+      - name: Resolve inputs & compute names/paths
         id: vars
         shell: bash
         run: |
@@ -50,7 +45,6 @@ jobs:
           CN_RAW="${{ github.event.inputs['container-name'] }}"
           EXTRA_ARGS="${{ github.event.inputs['extra-args'] }}"
           IN_MODEL_DIR="${{ github.event.inputs['model-mount-dir'] }}"
-          IN_PI_PROJ="${{ github.event.inputs['pi-proj-repo'] }}"
           REPO_NAME="${{ github.event.repository.name }}"
 
           if [[ -z "$IMAGE_NAME" ]]; then
@@ -67,21 +61,18 @@ jobs:
             IMAGE_REF="${IMAGE_NAME}:${TAG:-latest}"
           fi
 
-          # Display name (menu label)
+          # Menu label / display name
           DISPLAY_NAME="${CN_RAW:-EdgeAI_Pi5}"
 
-          # Docker/filename-safe slug (lowercase, spaces->-, only [a-z0-9._-])
+          # Safe slug for docker/container/filenames
           SLUG="$(printf '%s' "$DISPLAY_NAME" | tr '[:upper:]' '[:lower:]' | sed -E 's/[[:space:]]+/-/g; s/[^a-z0-9._-]//g')"
           [[ -n "$SLUG" ]] || SLUG="edgeai_pi5"
 
-          # Project folder name under /opt/edge
-          PI_PROJ="${IN_PI_PROJ:-$REPO_NAME}"
-
-          # Host model BASE dir (align with your design)
+          # Model base dir on host (blank => /opt/edge/<repo_name>)
           if [[ -n "$IN_MODEL_DIR" ]]; then
             HOST_MODEL_DIR="$IN_MODEL_DIR"
           else
-            HOST_MODEL_DIR="/opt/edge/${PI_PROJ}"
+            HOST_MODEL_DIR="/opt/edge/${REPO_NAME}"
           fi
 
           SCRIPT_PATH="/usr/local/bin/${SLUG}.sh"
@@ -93,16 +84,16 @@ jobs:
             echo "IMAGE_REF=$IMAGE_REF"
             echo "DISPLAY_NAME=$DISPLAY_NAME"
             echo "SLUG=$SLUG"
-            echo "PI_PROJ=$PI_PROJ"
             echo "HOST_MODEL_DIR=$HOST_MODEL_DIR"
             echo "SCRIPT_PATH=$SCRIPT_PATH"
             echo "DESKTOP_SYS=$DESKTOP_SYS"
             echo "UN_SCRIPT_PATH=$UN_SCRIPT_PATH"
             echo "UN_DESKTOP_SYS=$UN_DESKTOP_SYS"
             echo "EXTRA_ARGS=$EXTRA_ARGS"
+            echo "REPO_NAME=$REPO_NAME"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Require sudo and install GUI helpers
+      - name: Require sudo & install helpers
         shell: bash
         run: |
           if ! sudo -n true 2>/dev/null; then
@@ -112,32 +103,30 @@ jobs:
           sudo apt-get update -y
           sudo apt-get install -y zenity policykit-1 xdg-utils || true
 
-      - name: Pre-pull image (faster first launch)
+      - name: Pre-pull image
         shell: bash
         run: |
           set -euo pipefail
           /usr/bin/docker pull "${{ steps.vars.outputs.IMAGE_REF }}"
 
-      - name: Ensure model BASE directory exists (host) and is readable
+      - name: Ensure model BASE directory exists (and subdirs)
         shell: bash
         run: |
           set -euo pipefail
           DIR="${{ steps.vars.outputs.HOST_MODEL_DIR }}"
-
-          # Create base + standard subfolders if missing
           sudo mkdir -p "$DIR" "$DIR/models" "$DIR/manifests" "$DIR/tmp"
           sudo chmod 755 "$DIR" "$DIR/models" "$DIR/manifests" "$DIR/tmp"
 
-          # Drop a README only if directory is empty (avoids heredoc pitfalls and avoids polluting existing trees)
+          # Drop a README only if directory is truly empty (no pollution)
           if [ -z "$(ls -A "$DIR" 2>/dev/null)" ]; then
-            sudo bash -c "cat > '$DIR/README.txt' <<'EOF'
+            sudo bash -c 'cat > "'"$DIR"'/README.txt" <<'"'"'EOF'"'"'
             This is the model base directory.
 
             Standard layout:
               models/           - versioned model files
               manifests/        - metadata per model
               tmp/              - staging during deployment
-              current.onnx      - symlink to active model (typically relative to ./models/)
+              current.onnx      - symlink to active model (typically under ./models/)
               previous.onnx     - symlink to previous model
               deployments.log   - deployment history log
 
@@ -147,11 +136,10 @@ jobs:
 
             To switch models, repoint current.onnx to the desired file, e.g.:
               ln -s ./models/model_v3.onnx current.onnx
-            EOF"
+            EOF'
             sudo chmod 644 "$DIR/README.txt"
           fi
 
-          # Non-fatal hint if current.onnx missing
           if [ ! -e "$DIR/current.onnx" ]; then
             echo "Note: $DIR/current.onnx not found yet (your app may show a 'no model' message until you add it)."
           fi
@@ -182,7 +170,7 @@ jobs:
           CONTAINER_NAME="__SLUG__"
           LOG="/tmp/${CONTAINER_NAME}.log"
 
-          # Host model BASE dir baked in at deploy; allow override via MODEL_MOUNT_DIR
+          # Host model base dir baked in at deploy; allow override via MODEL_MOUNT_DIR
           HOST_MODEL_DIR_DEFAULT="__HOST_MODEL_DIR__"
           HOST_MODEL_DIR="${MODEL_MOUNT_DIR:-$HOST_MODEL_DIR_DEFAULT}"
 
@@ -355,7 +343,7 @@ jobs:
           rm -f "/usr/share/applications/${SLUG}_uninstall.desktop" || true
           rm -f "/tmp/${SLUG}.log" || true
 
-          # Ask about removing the image (models are left intact by design)
+          # Ask about removing the image (models left intact by design)
           if ask_remove_image; then
             /usr/bin/docker rmi "${IMAGE_REF}" >/dev/null 2>&1 || true
           fi
