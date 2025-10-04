@@ -417,7 +417,7 @@ jobs:
             sudo ln -sfn "$OLD" "$TARGET_BASE/previous.onnx"
           fi
 
-          sudo ln -sfn "$FINAL" "$TARGET_BASE/current.onnx"
+          sudo ln -sfnr "$FINAL" "$TARGET_BASE/current.onnx"
 
           # Log the deployment
           echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) DEPLOY model_id=${MODEL_ID} source=${SOURCE_REPO} project=${PI_PROJECT_NAME} file=$(basename "$FINAL")" | sudo tee -a "$TARGET_BASE/deployments.log" > /dev/null
