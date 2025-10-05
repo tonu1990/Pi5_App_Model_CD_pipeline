@@ -1,188 +1,234 @@
-# .github/workflows/deploy-to-pi5.yml
-name: App CD - Deploy App Image from GHCR to Pi5
+# .github/workflows/deploy-to-pi.yml
+name: Deploy to Pi (Web App or GUI App)
 
 on:
   workflow_dispatch:
     inputs:
+      application-type:
+        description: "Choose how the app should be deployed"
+        type: choice
+        options:
+          - Web App
+          - GUI App
+        required: true
+        default: Web App
+
       image-name:
-        description: "Application image name (from GHCR) to deploy -leave blank to use repo variable IMAGE_NAME"
-        required: false
+        description: "GHCR image (e.g. ghcr.io/owner/app). If a digest (@sha256:...) or tag (:v1) is present, it will be used as-is."
+        required: true
         type: string
         default: ""
-      container-name:
-        description: "Name to use Pi for Application container -leave blank to use APP_NAME from .env or 'pi_app'"
-        required: false
-        type: string
-        default: ""
-      host-port:
-        description: "Host port in Pi where Application is to be deployed -leave blank to use HOST_PORT from .env"
-        required: false
-        type: string
-        default: ""
+
       tag:
-        description: "Image tag"
+        description: "Image tag (ignored if image-name already has tag or digest)"
         required: false
         type: string
         default: "latest"
 
+      container-name:
+        description: "Human-friendly name (we'll safely slug this for Docker and filenames)"
+        required: true
+        type: string
+        default: "EdgeAI Pi5 Demo"
+
       model-mount-dir:
-        description: "Model mount directory on Pi - leave blank to use /opt/edge/<repo_name>"
+        description: "Host model directory. Leave blank to use /opt/edge/<repo_name>"
         required: false
         type: string
         default: ""
+
+      host-port:
+        description: "(ONLY for Web App) Host port on the Pi"
+        required: false
+        type: string
+        default: "8080"
+
+      container-port:
+        description: "(ONLY for Web App) Container port (default 8080). If the actual port used when building the application image is not 8080, input the correct one."
+        required: false
+        type: string
+        default: "8080"
+
+      icon-name:
+        description: "(ONLY for GUI App) Menu/desktop display name (label shown to users)"
+        required: false
+        type: string
+        default: "EdgeAI_Pi5"
 
       extra-args:
-        description: "Additional Docker run arguments (e.g., --env KEY=VAL)"
+        description: "Optional: extra docker run args (e.g., --device /dev/video0 --group-add video -e KEY=VAL)"
         required: false
         type: string
         default: ""
-
 
 jobs:
   deploy-to-pi:
+    # This runs on your self-hosted Pi runner
     runs-on: [self-hosted, pi5, app_model_cd]
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout (needed to read repo name for defaults)
+        uses: actions/checkout@v4
 
-      - name: Load .env (if present)
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [ -f .env ]; then
-            if grep -q '^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*[[:space:]]*=' .env; then
-              set -a
-              # shellcheck disable=SC1091
-              . ./.env
-              set +a
-            else
-              echo "Found .env, but no VAR=VALUE lines were detected. Skipping."
-            fi
-          fi
-          echo "APP_NAME=${APP_NAME:-}"   >> "$GITHUB_ENV"
-          echo "HOST_PORT=${HOST_PORT:-}" >> "$GITHUB_ENV"
-          echo "APP_PORT=${APP_PORT:-}"   >> "$GITHUB_ENV"
-
-      - name: Resolve deployment parameters
+      - name: Resolve inputs (build IMAGE_REF, compute SLUG, pick model dir)
         id: resolve
         shell: bash
         run: |
           set -euo pipefail
 
-          IN_IMAGE="${{ inputs['image-name'] }}"
-          IN_NAME="${{ inputs['container-name'] }}"
-          IN_HOST="${{ inputs['host-port'] }}"
-          IN_TAG="${{ inputs.tag }}"
-          IN_MODEL_DIR="${{ inputs['model-mount-dir'] }}"
+          # --- 1) Read raw inputs ---
+          APP_TYPE="${{ inputs['application-type'] }}"
+          IMAGE_IN="${{ inputs['image-name'] }}"
+          TAG_IN="${{ inputs.tag }}"
+          CN_HUMAN="${{ inputs['container-name'] }}"
+          ICON_NAME="${{ inputs['icon-name'] }}"
+          MODEL_DIR_IN="${{ inputs['model-mount-dir'] }}"
+          HOST_PORT_IN="${{ inputs['host-port'] }}"
+          CONT_PORT_IN="${{ inputs['container-port'] }}"
+          EXTRA_ARGS="${{ inputs['extra-args'] }}"
+          REPO_NAME="${{ github.event.repository.name }}"
 
-          VAR_IMAGE="${{ vars.IMAGE_NAME }}"
-
-          # Decide image name: input > repo variable
-          if [ -n "$IN_IMAGE" ]; then
-            IMAGE_NAME="$IN_IMAGE"
+          # --- 2) Build final IMAGE_REF (digest > tag-in-image > supplied tag) ---
+          # If image includes @sha256:..., use as-is
+          if [[ "$IMAGE_IN" == *@sha256:* ]]; then
+            IMAGE_REF="$IMAGE_IN"
+          # If image already has :tag (and it's not part of a path), use as-is
+          elif [[ "$IMAGE_IN" =~ :[^/]+$ ]]; then
+            IMAGE_REF="$IMAGE_IN"
+          # Otherwise, append :<tag> (default 'latest')
           else
-            if [ -z "$VAR_IMAGE" ]; then
-              echo "ERROR: Repository variable IMAGE_NAME is not set, and no image-name input was provided."
-              echo "Set Settings → Variables → Repository variables → IMAGE_NAME (e.g., 'ghcr.io/<owner>/<repo>' or just '<repo>')."
-              exit 1
-            fi
-            IMAGE_NAME="$VAR_IMAGE"
-          fi
-          # Prefix ghcr.io/<owner>/ if bare
-          if [[ "$IMAGE_NAME" != ghcr.io/* ]]; then
-            IMAGE_NAME="ghcr.io/${{ github.repository_owner }}/$IMAGE_NAME"
+            IMAGE_REF="${IMAGE_IN}:${TAG_IN:-latest}"
           fi
 
-          # Container name: input > .env APP_NAME > default
-          CONTAINER_NAME="${IN_NAME:-${APP_NAME:-pi_app}}"
+          # --- 3) Slug the human-friendly container name into a safe system name ---
+          # Slug rules (simple and predictable for PoC):
+          # - lowercase
+          # - spaces -> dashes
+          # - drop anything not [a-z0-9._-]
+          # - collapse multiple dashes
+          # - trim leading/trailing dashes/underscores/dots
+          # - fallback to "app" if empty
+          SLUG="$(printf '%s' "$CN_HUMAN" \
+            | tr '[:upper:]' '[:lower:]' \
+            | sed -E 's/[[:space:]]+/-/g; s/[^a-z0-9._-]//g; s/-+/-/g; s/^[-_.]+//; s/[-_.]+$//' )"
+          [[ -n "$SLUG" ]] || SLUG="app"
+          # Optional: limit to 63 chars for safety
+          SLUG="${SLUG:0:63}"
 
-          # Ports:
-          HOST_PORT_VAL="${IN_HOST:-${HOST_PORT:-8000}}"
-          CONT_PORT_VAL="${APP_PORT:-8080}"  # single source of truth from .env, fallback 8080
+          # --- 4) icon-name fallback (GUI label shown to users) ---
+          if [[ -z "$ICON_NAME" ]]; then
+            ICON_NAME="$CN_HUMAN"
+          fi
 
-          # Model directory: input > default to /opt/edge/<repo_name>
-          if [ -n "$IN_MODEL_DIR" ]; then
-            MODEL_DIR="$IN_MODEL_DIR"
+          # --- 5) Model directory on host ---
+          if [[ -n "$MODEL_DIR_IN" ]]; then
+            HOST_MODEL_DIR="$MODEL_DIR_IN"
           else
-            REPO_NAME="${{ github.event.repository.name }}"
-            MODEL_DIR="/opt/edge/${REPO_NAME}"
+            HOST_MODEL_DIR="/opt/edge/${REPO_NAME}"
           fi
 
-          # Validate numerics
-          [[ "$HOST_PORT_VAL" =~ ^[0-9]+$ ]] || { echo "HOST_PORT must be numeric (got '$HOST_PORT_VAL')"; exit 1; }
-          [[ "$CONT_PORT_VAL" =~ ^[0-9]+$ ]] || { echo "APP_PORT must be numeric (got '$CONT_PORT_VAL')"; exit 1; }
+          # --- 6) Ports (Web App only) ---
+          # Keep them as strings for now; we validate later only if "Web App"
+          HOST_PORT="$HOST_PORT_IN"
+          CONTAINER_PORT="$CONT_PORT_IN"
 
-          TAG="${IN_TAG:-latest}"
-          FULL_IMAGE_REF="${IMAGE_NAME}:${TAG}"
-
+          # --- 7) Save for later steps ---
           {
-            echo "IMAGE_NAME=$IMAGE_NAME"
-            echo "CONTAINER_NAME=$CONTAINER_NAME"
-            echo "HOST_PORT=$HOST_PORT_VAL"
-            echo "CONTAINER_PORT=$CONT_PORT_VAL"
-            echo "TAG=$TAG"
-            echo "FULL_IMAGE_REF=$FULL_IMAGE_REF"
-            echo "MODEL_DIR=$MODEL_DIR"
+            echo "APP_TYPE=$APP_TYPE"
+            echo "IMAGE_REF=$IMAGE_REF"
+            echo "SLUG=$SLUG"
+            echo "ICON_NAME=$ICON_NAME"
+            echo "HOST_MODEL_DIR=$HOST_MODEL_DIR"
+            echo "HOST_PORT=$HOST_PORT"
+            echo "CONTAINER_PORT=$CONTAINER_PORT"
+            echo "EXTRA_ARGS=$EXTRA_ARGS"
           } >> "$GITHUB_OUTPUT"
 
+          # --- 8) Short summary for humans (appears in job summary tab) ---
           {
-            echo "### Deployment parameters"
+            echo "### Inputs resolved"
             echo ""
             echo "| Key | Value |"
             echo "|---|---|"
-            echo "| Image | \`${FULL_IMAGE_REF}\` |"
-            echo "| Container name | \`${CONTAINER_NAME}\` |"
-            echo "| Host port | \`${HOST_PORT_VAL}\` |"
-            echo "| Container port | \`${CONT_PORT_VAL}\` |"
-            echo "| Model directory | \`${MODEL_DIR}\` |"
+            echo "| Application type | \`$APP_TYPE\` |"
+            echo "| Image reference | \`$IMAGE_REF\` |"
+            echo "| Container name (slug) | \`$SLUG\` |"
+            echo "| Icon name (GUI) | \`$ICON_NAME\` |"
+            echo "| Host model dir | \`$HOST_MODEL_DIR\` |"
+            echo "| Host port (Web) | \`$HOST_PORT\` |"
+            echo "| Container port (Web) | \`$CONTAINER_PORT\` |"
+            echo "| Extra args | \`$EXTRA_ARGS\` |"
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+      # If your image is private, add a GHCR login step here.
+      # For a PoC with public images, we keep it simple and skip auth.
 
-      - name: Pull Docker image
-        run: docker pull "${{ steps.resolve.outputs.FULL_IMAGE_REF }}"
-
-      - name: Stop and remove old container with same name (if exists)
-        shell: bash
-        run: |
-          docker stop "${{ steps.resolve.outputs.CONTAINER_NAME }}" || true
-          docker rm   "${{ steps.resolve.outputs.CONTAINER_NAME }}" || true
-
-      - name: Check for host-port conflicts
+      - name: Pull Docker image (common step for both types)
         shell: bash
         run: |
           set -euo pipefail
-          PORT="${{ steps.resolve.outputs.HOST_PORT }}"
-          NAME="${{ steps.resolve.outputs.CONTAINER_NAME }}"
+          docker pull "${{ steps.resolve.outputs.IMAGE_REF }}"
+
+      - name: Verify model dir exists
+        shell: bash
+        run: |
+          set -euo pipefail
+          DIR="${{ steps.resolve.outputs.HOST_MODEL_DIR }}"
+          if [[ -d "$DIR" ]]; then
+            echo "✅ Model directory exists: $DIR"
+            # Optional: warn if current.onnx missing (some apps can still start)
+            if [[ ! -e "$DIR/current.onnx" ]]; then
+              echo "⚠️  Warning: $DIR/current.onnx not found. App may start without a model."
+            fi
+          else
+            echo "⚠️  Warning: Model directory does not exist yet: $DIR"
+          fi
+
+      # =========================
+      # === Branch: Web App =====
+      # =========================
+      - name: Web App | Validate ports and stop existing container
+        if: ${{ steps.resolve.outputs.APP_TYPE == 'Web App' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          NAME="${{ steps.resolve.outputs.SLUG }}"
+          HPORT="${{ steps.resolve.outputs.HOST_PORT }}"
+          CPORT="${{ steps.resolve.outputs.CONTAINER_PORT }}"
+
+          # Basic numeric validation for a beginner-friendly PoC
+          [[ "$HPORT" =~ ^[0-9]+$ ]] || { echo "HOST_PORT must be numeric (got '$HPORT')"; exit 1; }
+          [[ "$CPORT" =~ ^[0-9]+$ ]] || { echo "CONTAINER_PORT must be numeric (got '$CPORT')"; exit 1; }
+
+          # Check if host port is already in use by a different container
           CONFLICTS=$(docker ps --format '{{.Names}} {{.Ports}}' \
-            | grep -E "0\.0\.0\.0:${PORT}->|\\[::\\]:${PORT}->" \
+            | grep -E "0\.0\.0\.0:${HPORT}->|\\[::\\]:${HPORT}->" \
             | awk '{print $1}' \
             | grep -v "^${NAME}$" || true)
-          if [ -n "$CONFLICTS" ]; then
-            echo "ERROR: Host port ${PORT} is already in use by: ${CONFLICTS}"
-            echo "Pick a different host port or stop the conflicting container(s)."
+          if [[ -n "$CONFLICTS" ]]; then
+            echo "❌ Host port ${HPORT} is in use by: ${CONFLICTS}"
             exit 1
           fi
 
-      - name: Verify model mount directory exists on Pi
-        shell: bash
-        run: |
-          MODEL_DIR="${{ steps.resolve.outputs.MODEL_DIR }}"
-          test -d "$MODEL_DIR" || { echo "Missing model directory: $MODEL_DIR"; exit 1; }
-          ls -l "$MODEL_DIR" || true
-          readlink -f "$MODEL_DIR/current.onnx" || echo "Note: current.onnx not set yet in $MODEL_DIR"
+          # Stop/remove container with the same name (idempotent)
+          docker stop "$NAME" >/dev/null 2>&1 || true
+          docker rm   "$NAME" >/dev/null 2>&1 || true
+          echo "Previous container (if any) is stopped/removed."
 
-      - name: Run new container
+      - name: Web App | Run container as a daemon
+        if: ${{ steps.resolve.outputs.APP_TYPE == 'Web App' }}
         shell: bash
         run: |
           set -euo pipefail
-          EXTRA='${{ inputs.extra-args }}'
-          if [ -n "$EXTRA" ]; then
+          NAME="${{ steps.resolve.outputs.SLUG }}"
+          IMG="${{ steps.resolve.outputs.IMAGE_REF }}"
+          HPORT="${{ steps.resolve.outputs.HOST_PORT }}"
+          CPORT="${{ steps.resolve.outputs.CONTAINER_PORT }}"
+          MODELDIR="${{ steps.resolve.outputs.HOST_MODEL_DIR }}"
+          EXTRA='${{ steps.resolve.outputs.EXTRA_ARGS }}'
+
+          # Split extra-args into an array (if provided)
+          if [[ -n "$EXTRA" ]]; then
             # shellcheck disable=SC2206
             EXTRA_ARR=($EXTRA)
           else
@@ -190,121 +236,238 @@ jobs:
           fi
 
           docker run -d \
-            --name "${{ steps.resolve.outputs.CONTAINER_NAME }}" \
+            --name "$NAME" \
             --restart unless-stopped \
-            -p "${{ steps.resolve.outputs.HOST_PORT }}:${{ steps.resolve.outputs.CONTAINER_PORT }}" \
-            -e MODEL_PATH="${{ steps.resolve.outputs.MODEL_DIR }}/current.onnx" \
-            -v "${{ steps.resolve.outputs.MODEL_DIR }}:${{ steps.resolve.outputs.MODEL_DIR }}:ro" \
+            -p "${HPORT}:${CPORT}" \
+            -e MODEL_DIR=/models \
+            -e MODEL_PATH=/models/current.onnx \
+            -v "${MODELDIR}:/models:ro" \
             "${EXTRA_ARR[@]}" \
-            "${{ steps.resolve.outputs.FULL_IMAGE_REF }}"
+            "$IMG"
 
-      - name: Verify container is running
+          echo "Container started: $NAME"
+
+      - name: Web App | Quick health probe (best-effort)
+        if: ${{ steps.resolve.outputs.APP_TYPE == 'Web App' }}
         shell: bash
         run: |
           set -euo pipefail
-          CONTAINER_NAME="${{ steps.resolve.outputs.CONTAINER_NAME }}"
-          
-          # Wait a few seconds for container to start
-          sleep 5
-          
-          # Check if container is running
-          if docker ps --filter "name=${CONTAINER_NAME}" --filter "status=running" --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
-            echo "✅ Container ${CONTAINER_NAME} is running successfully"
-            docker ps --filter "name=${CONTAINER_NAME}" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+          HPORT="${{ steps.resolve.outputs.HOST_PORT }}"
+          NAME="${{ steps.resolve.outputs.SLUG }}"
+
+          # Give the app a few seconds to boot
+          sleep 8
+
+          if curl -fsS --max-time 5 "http://localhost:${HPORT}/health" >/dev/null; then
+            echo "✅ /health endpoint responding"
+          elif curl -fsS --max-time 5 "http://localhost:${HPORT}/" >/dev/null; then
+            echo "✅ Root endpoint responding"
           else
-            echo "❌ Container ${CONTAINER_NAME} failed to start or is not running"
-            echo "Container status:"
-            docker ps -a --filter "name=${CONTAINER_NAME}" --format "table {{.Names}}\t{{.Status}}"
-            echo "Container logs:"
-            docker logs "${CONTAINER_NAME}" || echo "No logs available"
+            echo "⚠️  Health check failed (this may be fine if your app has no HTTP endpoint)"
+            echo "Recent logs:"
+            docker logs --tail 40 "$NAME" || true
+          fi
+
+      - name: Web App | Cleanup old images (keep newest 3)
+        if: ${{ steps.resolve.outputs.APP_TYPE == 'Web App' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Clean only images belonging to the same repository (without tag/digest)
+          # Extract the repo (left side of ':') from IMAGE_REF if present.
+          REF="${{ steps.resolve.outputs.IMAGE_REF }}"
+          REPO="${REF%%:*}"  # this is safe when REF is 'repo:tag'; for digests it still gives a sensible root
+
+          echo "Cleaning older images for $REPO (keep newest 3)..."
+          OLD_IMAGES=$(docker images "$REPO" --format "{{.ID}} {{.Repository}}:{{.Tag}} {{.CreatedAt}}" \
+            | sort -k3 -r | tail -n +4 | awk '{print $1}' || true)
+          if [[ -n "$OLD_IMAGES" ]]; then
+            # shellcheck disable=SC2086
+            docker rmi $OLD_IMAGES || echo "Some images could not be removed (may be in use)."
+          else
+            echo "No old images to remove."
+          fi
+
+      - name: Web App | Summary
+        if: ${{ steps.resolve.outputs.APP_TYPE == 'Web App' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          NAME="${{ steps.resolve.outputs.SLUG }}"
+          IMG="${{ steps.resolve.outputs.IMAGE_REF }}"
+          HPORT="${{ steps.resolve.outputs.HOST_PORT }}"
+          CPORT="${{ steps.resolve.outputs.CONTAINER_PORT }}"
+          MODELDIR="${{ steps.resolve.outputs.HOST_MODEL_DIR }}"
+
+          STATUS=$(docker inspect --format='{{.State.Status}}' "$NAME" 2>/dev/null || echo "unknown")
+
+          {
+            echo "## Web App Deployment"
+            echo ""
+            echo "| Key | Value |"
+            echo "|---|---|"
+            echo "| Image | \`$IMG\` |"
+            echo "| Container | \`$NAME\` |"
+            echo "| Ports | \`$HPORT:$CPORT\` |"
+            echo "| Model mount | \`$MODELDIR -> /models\` |"
+            echo "| Status | \`$STATUS\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # =========================
+      # === Branch: GUI App =====
+      # =========================
+      - name: GUI App | Require passwordless sudo (we install files under /usr/local and /usr/share)
+        if: ${{ steps.resolve.outputs.APP_TYPE == 'GUI App' }}
+        shell: bash
+        run: |
+          if ! sudo -n true 2>/dev/null; then
+            echo "This step needs passwordless sudo on the runner to write system paths." >&2
             exit 1
           fi
 
-      - name: Health check (optional)
+      - name: GUI App | Install helpers (best-effort)
+        if: ${{ steps.resolve.outputs.APP_TYPE == 'GUI App' }}
         shell: bash
         run: |
           set -euo pipefail
-          HOST_PORT="${{ steps.resolve.outputs.HOST_PORT }}"
-          CONTAINER_NAME="${{ steps.resolve.outputs.CONTAINER_NAME }}"
-          
-          echo "Performing health check on port ${HOST_PORT}..."
-          
-          # Wait for application to initialize
-          sleep 10
-          
-          # Try basic connectivity test (adjust endpoint as needed)
-          if curl -f -s --max-time 5 "http://localhost:${HOST_PORT}/health" > /dev/null 2>&1; then
-            echo "✅ Health check passed - application is responding"
-          elif curl -f -s --max-time 5 "http://localhost:${HOST_PORT}/" > /dev/null 2>&1; then
-            echo "✅ Basic connectivity check passed - root endpoint responding"
-          else
-            echo "⚠️  Health/connectivity check failed - this may be normal if no health endpoint exists"
-            echo "Application may still be starting up. Check logs:"
-            docker logs --tail 10 "${CONTAINER_NAME}"
-            echo "Note: This is not necessarily an error if your app doesn't have a health endpoint"
+          sudo apt-get update -y
+          sudo apt-get install -y xdg-utils || true
+
+      - name: GUI App | Install launcher script and desktop entry
+        if: ${{ steps.resolve.outputs.APP_TYPE == 'GUI App' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Read resolved values
+          SLUG="${{ steps.resolve.outputs.SLUG }}"
+          ICON_NAME="${{ steps.resolve.outputs.ICON_NAME }}"
+          IMG="${{ steps.resolve.outputs.IMAGE_REF }}"
+          MODELDIR="${{ steps.resolve.outputs.HOST_MODEL_DIR }}"
+          EXTRA='${{ steps.resolve.outputs.EXTRA_ARGS }}'
+
+          # Paths we will create
+          LAUNCHER="/usr/local/bin/${SLUG}.sh"
+          DESKTOP_SYS="/usr/share/applications/${SLUG}.desktop"
+
+          # --- Create launcher script ---
+          TMP="$(mktemp)"
+          cat > "$TMP" <<'EOSH'
+          #!/usr/bin/env bash
+          # Beginner note: this script is called when you click the desktop/menu icon.
+          # It starts the Dockerized GUI app as the *current user* and wires up X11 and the camera.
+
+          set -euo pipefail
+
+          DOCKER=/usr/bin/docker
+          ID=/usr/bin/id
+          XHOST=/usr/bin/xhost
+
+          IMAGE="__IMAGE__"
+          NAME="__NAME__"
+          HOST_MODEL_DIR="__HOST_MODEL_DIR__"
+          EXTRA_ARGS_PLACEHOLDER="__EXTRA_ARGS__"
+
+          LOG="/tmp/${NAME}.log"
+
+          # 1) Pick a camera device (very simple PoC: prefer /dev/video0)
+          DEVICE=""
+          if [[ -n "${CAM_DEVICE:-}" ]]; then
+            DEVICE="$CAM_DEVICE"
+          elif [[ -e /dev/video0 ]]; then
+            DEVICE="/dev/video0"
+          elif ls -1 /dev/video* >/dev/null 2>&1; then
+            DEVICE="$(ls -1 /dev/video* | head -n1)"
           fi
 
-      - name: Cleanup old images
-        shell: bash
-        run: |
-          set -euo pipefail
-          IMAGE_NAME="${{ steps.resolve.outputs.IMAGE_NAME }}"
-          
-          echo "Cleaning up old images for ${IMAGE_NAME}..."
-          
-          # Get all images for this repository, sort by created date (newest first), skip first 3, remove the rest
-          OLD_IMAGES=$(docker images "${IMAGE_NAME}" --format "{{.ID}} {{.CreatedAt}}" | \
-            sort -k2 -r | tail -n +4 | awk '{print $1}' || true)
-          
-          if [ -n "$OLD_IMAGES" ]; then
-            echo "Removing old images: $OLD_IMAGES"
-            # shellcheck disable=SC2086
-            docker rmi $OLD_IMAGES || echo "Some images could not be removed (may be in use)"
-          else
-            echo "No old images to clean up"
+          # 2) Prepare X (GUI) environment variables and runtime dir
+          export DISPLAY="${DISPLAY:-:0}"
+          export XDG_RUNTIME_DIR="/tmp/runtime-$("$ID" -u)"
+          mkdir -p "$XDG_RUNTIME_DIR" /tmp/.cache
+
+          # Allow local user access to X server (best-effort)
+          $XHOST +SI:localuser:$("$ID" -un) >/dev/null 2>&1 || true
+
+          # 3) Build docker args (array) with safe defaults
+          ARGS=(
+            --rm
+            --name "$NAME"
+            --user "$("$ID" -u):$("$ID" -g)"
+            -e DISPLAY="$DISPLAY"
+            -e HOME=/tmp
+            -e XDG_CACHE_HOME=/tmp/.cache
+            -e XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR"
+            -e MODEL_DIR=/models
+            -e MODEL_PATH=/models/current.onnx
+            -v /tmp/.X11-unix:/tmp/.X11-unix:ro
+            -v "$HOST_MODEL_DIR:/models:ro"
+          )
+
+          # Camera is optional—only add if we found one
+          if [[ -n "$DEVICE" ]]; then
+            ARGS+=( --device "$DEVICE:$DEVICE" --group-add video )
           fi
 
-      - name: Deployment summary
+          # 4) Append user-provided extra args last (so they can override defaults)
+          if [[ -n "$EXTRA_ARGS_PLACEHOLDER" ]]; then
+            # shellcheck disable=SC2206
+            EXTRA_ARR=($EXTRA_ARGS_PLACEHOLDER)
+            ARGS+=( "${EXTRA_ARR[@]}" )
+          fi
+
+          # 5) Run the container
+          exec "$DOCKER" run "${ARGS[@]}" "$IMAGE" >>"$LOG" 2>&1
+          EOSH
+
+          # Fill in template variables
+          sed -i "s|__IMAGE__|$IMG|g" "$TMP"
+          sed -i "s|__NAME__|$SLUG|g" "$TMP"
+          sed -i "s|__HOST_MODEL_DIR__|$MODELDIR|g" "$TMP"
+          sed -i "s|__EXTRA_ARGS__|$EXTRA|g" "$TMP"
+
+          # Install launcher
+          sudo install -m 0755 "$TMP" "$LAUNCHER"
+          rm -f "$TMP"
+
+          # --- Create a system .desktop entry (shows up in menus) ---
+          TMPD="$(mktemp)"
+          cat > "$TMPD" <<EOF
+          [Desktop Entry]
+          Type=Application
+          Name=${ICON_NAME}
+          Comment=Launch ${ICON_NAME}
+          Exec=${LAUNCHER}
+          Icon=utilities-camera
+          Terminal=false
+          Categories=Graphics;Video;
+          StartupNotify=false
+          EOF
+
+          sudo install -m 0644 "$TMPD" "$DESKTOP_SYS"
+          rm -f "$TMPD"
+
+          # Best-effort: refresh desktop database
+          command -v xdg-desktop-menu >/dev/null && xdg-desktop-menu forceupdate || true
+          command -v update-desktop-database >/dev/null && sudo update-desktop-database || true
+
+          echo "Installed launcher: $LAUNCHER"
+          echo "Installed desktop entry: $DESKTOP_SYS"
+
+      - name: GUI App | Summary
+        if: ${{ steps.resolve.outputs.APP_TYPE == 'GUI App' }}
         shell: bash
         run: |
           set -euo pipefail
-          
-          CONTAINER_NAME="${{ steps.resolve.outputs.CONTAINER_NAME }}"
-          FULL_IMAGE_REF="${{ steps.resolve.outputs.FULL_IMAGE_REF }}"
-          HOST_PORT="${{ steps.resolve.outputs.HOST_PORT }}"
-          CONTAINER_PORT="${{ steps.resolve.outputs.CONTAINER_PORT }}"
-          MODEL_DIR="${{ steps.resolve.outputs.MODEL_DIR }}"
-          
-          # Get container status
-          STATUS=$(docker inspect --format='{{.State.Status}}' "${CONTAINER_NAME}" 2>/dev/null || echo "unknown")
-          
           {
-            echo "## 🚀 Deployment Summary"
+            echo "## GUI App Installation"
             echo ""
-            echo "| Parameter | Value |"
-            echo "|-----------|-------|"
-            echo "| **Image** | \`${FULL_IMAGE_REF}\` |"
-            echo "| **Container** | \`${CONTAINER_NAME}\` |"
-            echo "| **Port Mapping** | \`${HOST_PORT}:${CONTAINER_PORT}\` |"
-            echo "| **Model Path** | \`${MODEL_DIR}/current.onnx\` |"
-            echo "| **Status** | \`${STATUS}\` |"
+            echo "| Key | Value |"
+            echo "|---|---|"
+            echo "| Image | \`${{ steps.resolve.outputs.IMAGE_REF }}\` |"
+            echo "| Container (slug) | \`${{ steps.resolve.outputs.SLUG }}\` |"
+            echo "| Launcher | \`/usr/local/bin/${{ steps.resolve.outputs.SLUG }}.sh\` |"
+            echo "| Desktop entry | \`/usr/share/applications/${{ steps.resolve.outputs.SLUG }}.desktop\` |"
+            echo "| Model mount | \`${{ steps.resolve.outputs.HOST_MODEL_DIR }} -> /models\` |"
             echo ""
-            echo "### Container Details"
-            echo "\`\`\`"
-            docker ps --filter "name=${CONTAINER_NAME}" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}\t{{.Image}}" || true
-            echo "\`\`\`"
-            echo ""
-            if [ "$STATUS" = "running" ]; then
-              echo "✅ **Deployment successful!** Your application is running at http://localhost:${HOST_PORT}"
-            else
-              echo "❌ **Deployment issue detected.** Container status: ${STATUS}"
-            fi
+            echo "_Note: The container runs **when you click** the desktop/menu icon._"
           } >> "$GITHUB_STEP_SUMMARY"
-          
-          echo "=== Deployment Complete ==="
-          echo "✅ Image: ${FULL_IMAGE_REF}"
-          echo "✅ Container: ${CONTAINER_NAME}"
-          echo "✅ Port: ${HOST_PORT}:${CONTAINER_PORT}"
-          echo "✅ Model: ${MODEL_DIR}/current.onnx"
-          echo "✅ Status: ${STATUS}"
-          echo "=========================="
