@@ -5,7 +5,7 @@ on:
   workflow_dispatch:
     inputs:
       application-type:
-        description: "Choose how the app should be deployed"
+        description: "Choose the Application type (WEB App or GUI App)"
         type: choice
         options:
           - Web App
@@ -14,44 +14,44 @@ on:
         default: Web App
 
       image-name:
-        description: "GHCR image (e.g. ghcr.io/owner/app). If a digest (@sha256:...) or tag (:v1) is present, it will be used as-is."
+        description: "GHCR image name (e.g. ghcr.io/owner/app)."
         required: true
         type: string
         default: ""
 
       tag:
-        description: "Image tag (ignored if image-name already has tag or digest)"
+        description: "Image tag"
         required: false
         type: string
         default: "latest"
 
       container-name:
-        description: "Human-friendly name (we'll safely slug this for Docker and filenames)"
+        description: "Human-friendly name for Pi for Application container"
         required: true
         type: string
         default: "EdgeAI Pi5 Demo"
 
       model-mount-dir:
-        description: "Host model directory. Leave blank to use /opt/edge/<repo_name>"
+        description: "Host model directory to mount to App-Leave blank to use /opt/edge/<repo_name>"
         required: false
         type: string
         default: ""
 
       host-port:
-        description: "(ONLY for Web App) Host port on the Pi"
-        required: false
+        description: "(WEB App ONLY) Host port on the Pi"
+        required: true
         type: string
         default: "8080"
 
       container-port:
-        description: "(ONLY for Web App) Container port (default 8080). If the actual port used when building the application image is not 8080, input the correct one."
-        required: false
+        description: "(WEB App ONLY) Container port (default 8080). Input the actual port used while building the application image"
+        required: true
         type: string
         default: "8080"
 
       icon-name:
-        description: "(ONLY for GUI App) Menu/desktop display name (label shown to users)"
-        required: false
+        description: "(GUI APP ONLY) App launch icon name (Menu icon/Desktop icon)"
+        required: true
         type: string
         default: "EdgeAI_Pi5"
 
