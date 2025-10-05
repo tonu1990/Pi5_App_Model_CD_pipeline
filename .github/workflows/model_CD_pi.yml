@@ -1,4 +1,4 @@
-name: Model CD - Ship latest ONNX model Pi
+name: Model CD - Ship latest trained Model(.ONNX) model Pi
 
 on:
   # Allow manual runs with configurable source repo
