@@ -63,7 +63,7 @@ on:
 
 jobs:
   deploy-to-pi:
-    # This runs on your self-hosted Pi runner
+    # This runs on self-hosted Pi runner
     runs-on: [self-hosted, pi5, app_model_cd]
 
     steps:
@@ -76,7 +76,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          # --- 1) Read raw inputs ---
+          # Read raw inputs
           APP_TYPE="${{ inputs['application-type'] }}"
           IMAGE_IN="${{ inputs['image-name'] }}"
           TAG_IN="${{ inputs.tag }}"
@@ -88,20 +88,21 @@ jobs:
           EXTRA_ARGS="${{ inputs['extra-args'] }}"
           REPO_NAME="${{ github.event.repository.name }}"
 
-          # --- 2) Build final IMAGE_REF (digest > tag-in-image > supplied tag) ---
+          # Build final IMAGE_REF
           # If image includes @sha256:..., use as-is
           if [[ "$IMAGE_IN" == *@sha256:* ]]; then
             IMAGE_REF="$IMAGE_IN"
-          # If image already has :tag (and it's not part of a path), use as-is
+            
+          # If image already has :tag , use as-is
           elif [[ "$IMAGE_IN" =~ :[^/]+$ ]]; then
             IMAGE_REF="$IMAGE_IN"
+            
           # Otherwise, append :<tag> (default 'latest')
           else
             IMAGE_REF="${IMAGE_IN}:${TAG_IN:-latest}"
           fi
 
-          # --- 3) Slug the human-friendly container name into a safe system name ---
-          # Slug rules (simple and predictable for PoC):
+          # Slug the container name into a safe system name 
           # - lowercase
           # - spaces -> dashes
           # - drop anything not [a-z0-9._-]
@@ -115,24 +116,24 @@ jobs:
           # Optional: limit to 63 chars for safety
           SLUG="${SLUG:0:63}"
 
-          # --- 4) icon-name fallback (GUI label shown to users) ---
+          # icon-name fallback (GUI label shown to users)
           if [[ -z "$ICON_NAME" ]]; then
             ICON_NAME="$CN_HUMAN"
           fi
 
-          # --- 5) Model directory on host ---
+          # Model directory on host
           if [[ -n "$MODEL_DIR_IN" ]]; then
             HOST_MODEL_DIR="$MODEL_DIR_IN"
           else
             HOST_MODEL_DIR="/opt/edge/${REPO_NAME}"
           fi
 
-          # --- 6) Ports (Web App only) ---
+          # Ports (Web App only)
           # Keep them as strings for now; we validate later only if "Web App"
           HOST_PORT="$HOST_PORT_IN"
           CONTAINER_PORT="$CONT_PORT_IN"
 
-          # --- 7) Save for later steps ---
+          # Save for later steps
           {
             echo "APP_TYPE=$APP_TYPE"
             echo "IMAGE_REF=$IMAGE_REF"
@@ -144,7 +145,7 @@ jobs:
             echo "EXTRA_ARGS=$EXTRA_ARGS"
           } >> "$GITHUB_OUTPUT"
 
-          # --- 8) Short summary for humans (appears in job summary tab) ---
+          # Short summary
           {
             echo "### Inputs resolved"
             echo ""
@@ -160,9 +161,7 @@ jobs:
             echo "| Extra args | \`$EXTRA_ARGS\` |"
           } >> "$GITHUB_STEP_SUMMARY"
 
-      # If your image is private, add a GHCR login step here.
       # For a PoC with public images, we keep it simple and skip auth.
-
       - name: Pull Docker image (common step for both types)
         shell: bash
         run: |
@@ -175,13 +174,13 @@ jobs:
           set -euo pipefail
           DIR="${{ steps.resolve.outputs.HOST_MODEL_DIR }}"
           if [[ -d "$DIR" ]]; then
-            echo "✅ Model directory exists: $DIR"
+            echo "Model directory exists: $DIR"
             # Optional: warn if current.onnx missing (some apps can still start)
             if [[ ! -e "$DIR/current.onnx" ]]; then
-              echo "⚠️  Warning: $DIR/current.onnx not found. App may start without a model."
+              echo "Warning: $DIR/current.onnx not found. App may start without a model."
             fi
           else
-            echo "⚠️  Warning: Model directory does not exist yet: $DIR"
+            echo "Warning: Model directory does not exist yet: $DIR"
           fi
 
       # =========================
@@ -206,7 +205,7 @@ jobs:
             | awk '{print $1}' \
             | grep -v "^${NAME}$" || true)
           if [[ -n "$CONFLICTS" ]]; then
-            echo "❌ Host port ${HPORT} is in use by: ${CONFLICTS}"
+            echo "Host port ${HPORT} is in use by: ${CONFLICTS}"
             exit 1
           fi
 
@@ -259,11 +258,11 @@ jobs:
           sleep 8
 
           if curl -fsS --max-time 5 "http://localhost:${HPORT}/health" >/dev/null; then
-            echo "✅ /health endpoint responding"
+            echo " /health endpoint responding"
           elif curl -fsS --max-time 5 "http://localhost:${HPORT}/" >/dev/null; then
-            echo "✅ Root endpoint responding"
+            echo " Root endpoint responding"
           else
-            echo "⚠️  Health check failed (this may be fine if your app has no HTTP endpoint)"
+            echo " Health check failed (this may be fine if your app has no HTTP endpoint)"
             echo "Recent logs:"
             docker logs --tail 40 "$NAME" || true
           fi
@@ -403,12 +402,12 @@ jobs:
             -v "$HOST_MODEL_DIR:/models:ro"
           )
 
-          # Camera is optional—only add if we found one
+          # Camera is optional—only add if found one
           if [[ -n "$DEVICE" ]]; then
             ARGS+=( --device "$DEVICE:$DEVICE" --group-add video )
           fi
 
-          # 4) Append user-provided extra args last (so they can override defaults)
+          # 4) Append extra args last (so they can override defaults)
           if [[ -n "$EXTRA_ARGS_PLACEHOLDER" ]]; then
             # shellcheck disable=SC2206
             EXTRA_ARR=($EXTRA_ARGS_PLACEHOLDER)
