@@ -1,4 +1,4 @@
-name: Deploy GUI launcher to Pi (Uninstall + Model Mount)
+name: GUI App CD - Launcher Script with Icons to Pi
 
 on:
   workflow_dispatch:
