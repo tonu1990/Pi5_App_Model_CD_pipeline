@@ -1,5 +1,5 @@
 # .github/workflows/deploy-to-pi.yml
-name: Deploy to Pi (Web App or GUI App)
+name: Deploy Application to Pi (Web App or GUI App)
 
 on:
   workflow_dispatch:
