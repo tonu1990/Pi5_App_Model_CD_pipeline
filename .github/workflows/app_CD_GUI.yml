@@ -4,17 +4,17 @@ on:
   workflow_dispatch:
     inputs:
       image-name:
-        description: "GHCR image (e.g. ghcr.io/owner/app)"
+        description: "GHCR image name (e.g. ghcr.io/owner/app)."
         required: true
         type: string
         default: ""
       tag:
-        description: "Image tag (ignored if image-name already has tag/digest)"
+        description: "Image tag "
         required: false
         type: string
         default: "latest"
       container-name:
-        description: "Menu/desktop display name (Docker name uses a safe slug)"
+        description: "Application container name (same will be used as Menu/Desktop icon Name)"
         required: false
         type: string
         default: "EdgeAI_Pi5"
