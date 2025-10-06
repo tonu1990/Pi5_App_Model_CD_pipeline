@@ -128,8 +128,7 @@ jobs:
             HOST_MODEL_DIR="/opt/edge/${REPO_NAME}"
           fi
 
-          # Ports (Web App only)
-          # Keep them as strings for now; we validate later only if "Web App"
+          # Ports (Web App only)          
           HOST_PORT="$HOST_PORT_IN"
           CONTAINER_PORT="$CONT_PORT_IN"
 
@@ -160,8 +159,7 @@ jobs:
             echo "| Container port (Web) | \`$CONTAINER_PORT\` |"
             echo "| Extra args | \`$EXTRA_ARGS\` |"
           } >> "$GITHUB_STEP_SUMMARY"
-
-      # For a PoC with public images, we keep it simple and skip auth.
+      
       - name: Pull Docker image (common step for both types)
         shell: bash
         run: |
