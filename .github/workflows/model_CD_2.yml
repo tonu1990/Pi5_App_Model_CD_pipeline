@@ -1,4 +1,3 @@
-# .github/workflows/modelcd-deploy-generic.yml
 name: Model CD2 — Deploy ONNX to Pi (Release or Repo artifacts)
 
 on:
@@ -16,9 +15,9 @@ on:
           - GithubRepo
       release-version:
         description: >
-          Release tag to deploy (e.g., v1.2.3). Use 'latest' to take the most
+          Release tag to deploy. Use 'latest' to take the most
           recent release. In GithubRepo mode: if 'latest', a new tag will be created.
-        required: false
+        required: true
         default: latest
       pi-project-dir:
         description: >
@@ -83,16 +82,19 @@ jobs:
         with:
           script: |
             const [owner, repo] = process.env.GITHUB_REPOSITORY.split('/');
-            const tag = core.getInput('release-version', { required: true });
+            const tag = '${{ github.event.inputs.release-version }}' || 'latest';
+            
             let release;
             if (tag === 'latest') {
               release = await github.rest.repos.getLatestRelease({ owner, repo });
             } else {
               release = await github.rest.repos.getReleaseByTag({ owner, repo, tag });
             }
+            
             const assets = release.data.assets || [];
             const onnx = assets.find(a => a.name?.toLowerCase().endsWith('.onnx'));
             if (!onnx) core.setFailed(`No .onnx asset found in release '${release.data.tag_name}'`);
+            
             core.setOutput('tag_name', release.data.tag_name);
             core.setOutput('asset_id', String(onnx.id));
             core.setOutput('asset_name', onnx.name);
@@ -174,7 +176,7 @@ jobs:
         with:
           script: |
             const [owner, repo] = process.env.GITHUB_REPOSITORY.split('/');
-            const requestedTag = core.getInput('release-version') || 'latest';
+            const requestedTag = '${{ github.event.inputs.release-version }}' || 'latest';
             const modelPath = process.env.MODEL_PATH;
             const fs = require('fs');
             const path = require('path');
