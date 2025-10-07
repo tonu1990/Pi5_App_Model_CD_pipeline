@@ -277,7 +277,7 @@ jobs:
           echo "Size: $BYTES bytes"
           echo "Source: ${{ github.repository }}"
           echo "Mode: ${{ github.event.inputs.model-source }}"
-          echo "Release: ${{ fromJSON(steps.rel.outputs.tag_name || steps.upload-release.outputs.tag_name || 'latest') }}"
+          echo "Release: ${{ steps.rel.outputs.tag_name || steps.upload-release.outputs.tag_name || 'latest' }}"
 
       - name: Compute sha256 (identity)
         id: hash
