@@ -1,4 +1,5 @@
-name: Model CD - Deploy ONNX Model to Pi
+name: Model CD2- Deploy ONNX Model to Pi
+
 
 on:
   workflow_dispatch:
