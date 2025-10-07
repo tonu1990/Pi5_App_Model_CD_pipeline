@@ -1,13 +1,13 @@
 # .github/workflows/modelcd-deploy-generic.yml
-name: Model CD 2— Deploy ONNX to Pi (from Release or Repo artifacts)
+name: Model CD2 — Deploy ONNX to Pi (Release or Repo artifacts)
 
 on:
   workflow_dispatch:
     inputs:
       model-source:
         description: >
-          "GithubRelease" to deploy from the repo's GitHub Release;
-          "GithubRepo" to upload and deploy from GitHub repo path /Model_dev/artifacts
+          GithubRelease to deploy from the repo's GitHub Release;
+          GithubRepo to upload and deploy from GitHub repo path /Model_dev/artifacts
         type: choice
         required: true
         default: GithubRelease
@@ -37,10 +37,8 @@ on:
         required: false
         default: ""
 
-# NOTE:
-# - We need 'contents: write' if you choose GithubRepo mode (to create/upload a Release).
-# - 'contents: read' would be enough for GithubRelease mode only.
 permissions:
+  # Need write to create/upload Release assets in GithubRepo mode
   contents: write
 
 concurrency:
@@ -52,18 +50,16 @@ jobs:
     name: Prepare Model Bundle (fetch/validate/package)
     runs-on: ubuntu-latest
     outputs:
-      model_name:     ${{ steps.set-common-outputs.outputs.model_name }}
-      model_sha:      ${{ steps.set-common-outputs.outputs.model_sha }}
-      short_sha:      ${{ steps.set-common-outputs.outputs.short_sha }}
-      utc_stamp:      ${{ steps.set-common-outputs.outputs.utc_stamp }}
-      source_tag:     ${{ steps.set-common-outputs.outputs.source_tag }}
+      model_name:      ${{ steps.set-common-outputs.outputs.model_name }}
+      model_sha:       ${{ steps.set-common-outputs.outputs.model_sha }}
+      short_sha:       ${{ steps.set-common-outputs.outputs.short_sha }}
+      utc_stamp:       ${{ steps.set-common-outputs.outputs.utc_stamp }}
+      source_tag:      ${{ steps.set-common-outputs.outputs.source_tag }}
       pi_project_name: ${{ steps.repo-config.outputs.pi_project_name }}
     steps:
-      # 1) Basic checkout — needed for GithubRepo mode (and handy context generally)
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # 2) Decide the project directory name that will be used on the Pi
       - name: Configure Pi project directory name
         id: repo-config
         shell: bash
@@ -75,12 +71,11 @@ jobs:
             PI_PROJECT_NAME="${{ github.event.inputs.pi-project-dir }}"
             echo "Using user-specified project directory: $PI_PROJECT_NAME"
           fi
-          # sanitize: strip slashes/dots
           PI_PROJECT_NAME="$(echo "$PI_PROJECT_NAME" | sed 's/[./]//g')"
           echo "Sanitized project name: $PI_PROJECT_NAME"
           echo "pi_project_name=$PI_PROJECT_NAME" >> "$GITHUB_OUTPUT"
 
-      # 3A) ---- SOURCE: GITHUB RELEASE ----
+      # ---- SOURCE: GithubRelease ----
       - name: Get release & select .onnx asset (GithubRelease mode)
         id: rel-release
         if: ${{ github.event.inputs['model-source'] == 'GithubRelease' }}
@@ -120,7 +115,7 @@ jobs:
             "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/assets/$ASSET_ID"
           echo "MODEL_PATH=$ASSET_NAME" >> "$GITHUB_ENV"
 
-      # 3B) ---- SOURCE: GITHUB REPO PATH (/Model_dev/artifacts) ----
+      # ---- SOURCE: GithubRepo (/Model_dev/artifacts) ----
       - name: Locate ONNX in repo (GithubRepo mode)
         id: find-repo
         if: ${{ github.event.inputs['model-source'] == 'GithubRepo' }}
@@ -173,7 +168,9 @@ jobs:
         if: ${{ github.event.inputs['model-source'] == 'GithubRepo' }}
         uses: actions/github-script@v7
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN:  ${{ github.token }}
+          UTC_STAMP: ${{ steps.early-meta.outputs.utc_stamp }}
+          SHORT_SHA: ${{ steps.early-meta.outputs.short_sha }}
         with:
           script: |
             const [owner, repo] = process.env.GITHUB_REPOSITORY.split('/');
@@ -182,16 +179,15 @@ jobs:
             const fs = require('fs');
             const path = require('path');
 
-            // Decide tag: use provided tag (if not 'latest'); else synthesize one.
+            // Tag selection: use provided tag if not 'latest'; else synthesize
             let tag = requestedTag;
             if (tag === 'latest') {
-              const short = process.env['SHORT_SHA'] || core.getInput('short_sha');
-              const stamp = process.env['UTC_STAMP'] || core.getInput('utc_stamp');
-              // Fallback: read from previous step outputs (passed via env soon)
+              const short = process.env['SHORT_SHA'];
+              const stamp = process.env['UTC_STAMP'];
               tag = `model-${stamp || 'now'}-${short || 'unknown'}`;
             }
 
-            // Create the release if needed (draft=false, prerelease=false)
+            // Create the release if needed
             let release;
             try {
               release = await github.rest.repos.getReleaseByTag({ owner, repo, tag });
@@ -208,9 +204,8 @@ jobs:
               }
             }
 
-            // Upload asset (replace if the same name already exists)
+            // Upload asset (replace if same name already exists)
             const assetName = path.basename(modelPath);
-            // If asset exists, delete it first (avoid "already exists")
             const assets = (await github.rest.repos.listReleaseAssets({ owner, repo, release_id: release.data.id })).data;
             const existing = assets.find(a => a.name === assetName);
             if (existing) {
@@ -233,12 +228,7 @@ jobs:
             core.setOutput('tag_name', tag);
             core.setOutput('asset_name', assetName);
 
-        # pass early outputs via env so the script can synthesize a tag if needed
-        env:
-          UTC_STAMP: ${{ steps.early-meta.outputs.utc_stamp }}
-          SHORT_SHA: ${{ steps.early-meta.outputs.short_sha }}
-
-      # 4) Common ONNX validation (recommended)
+      # ---- Common validation (both modes) ----
       - name: Show file size
         shell: bash
         run: |
@@ -250,50 +240,42 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+
       - name: Validate ONNX structure/opset/static shape
         shell: bash
         run: |
           python - << 'PY'
-          import os, sys, onnx
+          import os, onnx
           p = os.environ["MODEL_PATH"]
           m = onnx.load(p)
           onnx.checker.check_model(m)
-          # enforce opset policy
           minv, maxv = 12, 17
           opset = m.opset_import[0].version if m.opset_import else None
           if opset is None or not (minv <= opset <= maxv):
               raise SystemExit(f"Opset {opset} outside allowed range {minv}-{maxv}")
-          # enforce static input dims
           def dims(v): return [d.dim_value if d.HasField('dim_value') else None for d in v.type.tensor_type.shape.dim]
           for i in m.graph.input:
               ds = dims(i)
               if any(d in (None, 0) for d in ds):
                   raise SystemExit(f"Dynamic/unknown dims in input {i.name}: {ds}")
-          print("ONNX validation: OK (opset:", opset, ")")
+          print("ONNX validation: OK")
           PY
 
-      # 5) Finalize common outputs (sha, tag, timestamps, model name)
       - name: Set common outputs
         id: set-common-outputs
         shell: bash
         run: |
           set -euo pipefail
-          # sha256 identity
           SHA=$(sha256sum "$MODEL_PATH" | cut -d' ' -f1)
           SHORT="${SHA:0:12}"
           STAMP="${{ steps.early-meta.outputs.utc_stamp }}"
           if [ -z "$STAMP" ]; then STAMP="$(date -u +%Y%m%d-%H%M)"; fi
-
-          # source tag depends on mode
-          SRC_TAG=""
           if [ "${{ github.event.inputs.model-source }}" = "GithubRelease" ]; then
             SRC_TAG='${{ steps.rel-release.outputs.tag_name }}'
           else
             SRC_TAG='${{ steps.rel-repo.outputs.tag_name }}'
           fi
-
           NAME="$(basename "$MODEL_PATH")"
-
           echo "model_sha=$SHA"      >> "$GITHUB_OUTPUT"
           echo "short_sha=$SHORT"    >> "$GITHUB_OUTPUT"
           echo "utc_stamp=$STAMP"    >> "$GITHUB_OUTPUT"
@@ -326,8 +308,7 @@ jobs:
   deliver:
     name: Deliver to Pi & flip current.onnx
     needs: prepare
-    # IMPORTANT: ensure these labels match your Pi runner's labels.
-    # If your model runner uses [self-hosted, model-cd], change accordingly.
+    # Ensure these match your Pi runner labels
     runs-on: [self-hosted, app_model_cd]
     steps:
       - name: Download model bundle
@@ -421,7 +402,6 @@ jobs:
             OLD="$(readlink -f "$BASE/current.onnx")"
             ln -sfn "$OLD" "$BASE/previous.onnx"
           fi
-          # relative symlink so it resolves neatly inside containers too
           ln -sfnr "$FINAL" "$BASE/current.onnx"
 
           echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) DEPLOY model_id=$MODEL_ID file=$(basename "$FINAL") release=${{ needs.prepare.outputs.source_tag }}" >> "$BASE/deployments.log"
@@ -445,11 +425,8 @@ jobs:
             [ "$f" = "$CUR" ]  && { echo "Keep (current): $(basename "$f")"; continue; }
             [ -n "$PREV" ] && [ "$f" = "$PREV" ] && { echo "Keep (previous): $(basename "$f")"; continue; }
             echo "Prune: $(basename "$f")"
-            # derive manifest by full sha in filename: <bare>-<stamp>-<short>.onnx → match by base prefix
             base="$(basename "$f" .onnx)"
-            # delete any manifest that starts with the same base OR that includes the model_id (best-effort)
             rm -f "$BASE/manifests/${base}-"*.json 2>/dev/null || true
-            rm -f "$BASE/manifests/"*"${{ needs.prepare.outputs.model_sha }}"*.json 2>/dev/null || true
             rm -f -- "$f"
           done < /tmp/prune.txt
 
