@@ -1,0 +1,458 @@
+name: Model CD 2- Ship trained Model(.ONNX) to Pi
+
+on:
+  workflow_dispatch:
+    inputs:
+      release-version:
+        description: 'Version of GitHub Release artifacts to be deployed to Pi'
+        required: false
+        default: 'latest'
+        type: choice
+        options:
+          - latest
+          - v1.0
+          - v1.1
+          - v2.0
+      pi-proj-repo:
+        description: 'Project directory at Pi end. Leave empty to pick the Project repo name'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: model-cd
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Validate ONNX (from Release)
+    runs-on: ubuntu-latest
+    outputs:
+      model_name: ${{ steps.download.outputs.model_name }}
+      model_sha:  ${{ steps.hash.outputs.model_sha }}
+      short_sha:  ${{ steps.hash.outputs.short_sha }}
+      utc_stamp:  ${{ steps.utc.outputs.utc_stamp }}
+      source_repo: ${{ steps.repo-config.outputs.source_repo }}
+      source_tag: ${{ steps.rel.outputs.tag_name }}
+      repo_name: ${{ steps.repo-config.outputs.repo }}
+      pi_project_name: ${{ steps.repo-config.outputs.pi_project_name }}
+    steps:
+      - name: Checkout repository (for workflow context)
+        uses: actions/checkout@v4
+
+      - name: Configure project name logic
+        id: repo-config
+        shell: bash
+        run: |
+          SOURCE_REPO="$GITHUB_REPOSITORY"
+          echo "Using current repository: $SOURCE_REPO"
+          
+          # Extract owner and repo from the source
+          IFS='/' read -r OWNER REPO <<< "$SOURCE_REPO"
+          
+          # Determine project directory name
+          if [ -z "${{ github.event.inputs.pi-proj-repo }}" ]; then
+            PI_PROJECT_NAME="$REPO"
+            echo "Using repository name as project directory: $PI_PROJECT_NAME"
+          else
+            PI_PROJECT_NAME="${{ github.event.inputs.pi-proj-repo }}"
+            echo "Using user-specified project directory: $PI_PROJECT_NAME"
+          fi
+          
+          # Sanitize project name (remove any path characters for safety)
+          PI_PROJECT_NAME=$(echo "$PI_PROJECT_NAME" | sed 's/[./]//g')
+          echo "Sanitized project name: $PI_PROJECT_NAME"
+          
+          echo "source_repo=$SOURCE_REPO" >> $GITHUB_OUTPUT
+          echo "owner=$OWNER" >> $GITHUB_OUTPUT
+          echo "repo=$REPO" >> $GITHUB_OUTPUT
+          echo "pi_project_name=$PI_PROJECT_NAME" >> $GITHUB_OUTPUT
+
+      - name: Get release & select .onnx asset
+        id: rel
+        uses: actions/github-script@v7
+        env:
+          GH_TOKEN: ${{ github.token }}
+        with:
+          script: |
+            const owner = '${{ steps.repo-config.outputs.owner }}';
+            const repo = '${{ steps.repo-config.outputs.repo }}';
+            const releaseVersion = '${{ github.event.inputs.release-version }}';
+            const piProject = '${{ steps.repo-config.outputs.pi_project_name }}';
+            
+            console.log(`Looking for release in: ${owner}/${repo}`);
+            console.log(`Release version: ${releaseVersion}`);
+            console.log(`Pi project directory: ${piProject}`);
+            
+            try {
+              let release;
+              
+              if (releaseVersion === 'latest') {
+                // Get the latest release
+                console.log('Fetching latest release...');
+                release = await github.rest.repos.getLatestRelease({ owner, repo });
+              } else {
+                // Get specific release by tag name
+                console.log(`Fetching release with tag: ${releaseVersion}`);
+                release = await github.rest.repos.getReleaseByTag({
+                  owner,
+                  repo,
+                  tag: releaseVersion
+                });
+              }
+              
+              console.log(`Found release: ${release.data.tag_name}`);
+              
+              // Find ONNX assets in the release
+              const assets = release.data.assets || [];
+              const onnxAssets = assets.filter(a => a.name && a.name.toLowerCase().endsWith('.onnx'));
+              
+              if (onnxAssets.length === 0) {
+                core.setFailed(`No .onnx assets found in release "${release.data.tag_name}"`);
+                return;
+              }
+              
+              // For now, use the first ONNX asset found
+              const onnx = onnxAssets[0];
+              console.log(`Selected ONNX asset: ${onnx.name} (${onnxAssets.length} total ONNX files found)`);
+              
+              // Set outputs for downstream steps
+              core.setOutput('tag_name', release.data.tag_name);
+              core.setOutput('asset_id', String(onnx.id));
+              core.setOutput('asset_name', onnx.name);
+              core.setOutput('asset_count', String(onnxAssets.length));
+              
+              // If multiple ONNX files, warn but continue with first one
+              if (onnxAssets.length > 1) {
+                console.warn(`⚠️ Multiple ONNX files found. Using first file: ${onnx.name}`);
+                console.warn(`   Consider updating the workflow to handle multiple models if needed.`);
+              }
+              
+            } catch (error) {
+              if (error.status === 404) {
+                if ('${{ github.event.inputs.release-version }}' === 'latest') {
+                  core.setFailed(`No releases found in this repository. Please create a release first.`);
+                } else {
+                  core.setFailed(`Release '${{ github.event.inputs.release-version }}' not found. Available releases can be viewed in the repository.`);
+                }
+              } else {
+                core.setFailed(`Error accessing repository: ${error.message}`);
+              }
+            }
+
+      - name: Download ONNX asset from release
+        id: download
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          ASSET_ID='${{ steps.rel.outputs.asset_id }}'
+          ASSET_NAME='${{ steps.rel.outputs.asset_name }}'
+          SOURCE_REPO='${{ steps.repo-config.outputs.source_repo }}'
+          PI_PROJECT='${{ steps.repo-config.outputs.pi_project_name }}'
+          RELEASE_TAG='${{ steps.rel.outputs.tag_name }}'
+          
+          echo "Downloading asset: $ASSET_NAME (id=$ASSET_ID)"
+          echo "Source repository: $SOURCE_REPO"
+          echo "Release version: $RELEASE_TAG"
+          echo "Pi project directory: $PI_PROJECT"
+          
+          # Download from the current repository
+          curl -sSL \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/octet-stream" \
+            -o "$ASSET_NAME" \
+            "https://api.github.com/repos/${SOURCE_REPO}/releases/assets/$ASSET_ID"
+          
+          echo "MODEL_PATH=$ASSET_NAME" >> $GITHUB_ENV
+          echo "model_name=$ASSET_NAME" >> $GITHUB_OUTPUT
+
+      - name: Show file size (sanity check)
+        shell: bash
+        run: |
+          BYTES=$(stat -c%s "$MODEL_PATH")
+          echo "Downloaded size: $BYTES bytes"
+          echo "Source: ${{ steps.repo-config.outputs.source_repo }}"
+          echo "Release: ${{ steps.rel.outputs.tag_name }}"
+
+      - name: Basic ONNX structure validation
+        shell: bash
+        run: |
+          python - << 'PY'
+          import onnx
+          try:
+              model = onnx.load("$MODEL_PATH")
+              onnx.checker.check_model(model)
+              print("✓ ONNX model passed basic structure validation")
+              
+              # Log basic info for debugging
+              print(f"Model inputs: {[i.name for i in model.graph.input]}")
+              print(f"Model outputs: {[o.name for o in model.graph.output]}")
+              
+          except Exception as e:
+              print(f"❌ ONNX validation failed: {e}")
+              exit(1)
+          PY
+
+      - name: Compute sha256 (identity)
+        id: hash
+        shell: bash
+        run: |
+          SHA=$(sha256sum "$MODEL_PATH" | cut -d' ' -f1)
+          echo "sha256: $SHA"
+          echo "Source repo: ${{ steps.repo-config.outputs.source_repo }}"
+          echo "Release: ${{ steps.rel.outputs.tag_name }}"
+          echo "$SHA  $(basename "$MODEL_PATH")" > sha256.txt
+          echo "model_sha=$SHA" >> $GITHUB_OUTPUT
+          echo "short_sha=${SHA:0:12}" >> $GITHUB_OUTPUT
+
+      - name: UTC timestamp
+        id: utc
+        shell: bash
+        run: echo "utc_stamp=$(date -u +%Y%m%d-%H%M)" >> $GITHUB_OUTPUT
+
+      - name: Build manifest.json
+        shell: bash
+        run: |
+          cat > manifest.json << JSON
+          {
+            "model_id_sha256": "${{ steps.hash.outputs.model_sha }}",
+            "filename":        "${{ steps.download.outputs.model_name }}",
+            "created_at_utc":  "${{ steps.utc.outputs.utc_stamp }}",
+            "framework":       "onnx",
+            "source_repo":     "${{ steps.repo-config.outputs.source_repo }}",
+            "source_release":  "${{ steps.rel.outputs.tag_name }}",
+            "deployment_version": "${{ github.event.inputs.release-version }}",
+            "notes":           "validated: basic onnx structure check + sha256 verification"
+          }
+          JSON
+          cat manifest.json
+
+      - name: Upload bundle as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: validated-model
+          path: |
+            ${{ env.MODEL_PATH }}
+            sha256.txt
+            manifest.json
+
+  deliver:
+    name: Deliver to Pi and flip current.onnx
+    needs: validate
+    runs-on: [self-hosted, app_model_cd]
+    steps:
+      - name: Download validated bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: validated-model
+
+      - name: Show downloaded files and source info
+        run: |
+          echo "Model source repository: ${{ needs.validate.outputs.source_repo }}"
+          echo "Model source release: ${{ needs.validate.outputs.source_tag }}"
+          echo "Deployment version: ${{ github.event.inputs.release-version }}"
+          echo "Target repository folder: ${{ needs.validate.outputs.repo_name }}"
+          echo "Pi project directory: ${{ needs.validate.outputs.pi_project_name }}"
+          ls -l
+
+      - name: Create project directory structure on Pi
+        id: setup-dirs
+        shell: bash
+        run: |
+          PI_PROJECT_NAME="${{ needs.validate.outputs.pi_project_name }}"
+          TARGET_BASE="/opt/edge/$PI_PROJECT_NAME"
+          
+          echo "Creating project structure for: $PI_PROJECT_NAME"
+          echo "Base directory: $TARGET_BASE"
+          echo "Source repository: ${{ needs.validate.outputs.source_repo }}"
+          echo "Release version: ${{ needs.validate.outputs.source_tag }}"
+          
+          # Create all required directories
+          sudo mkdir -p "$TARGET_BASE/models"
+          sudo mkdir -p "$TARGET_BASE/manifests"
+          sudo mkdir -p "$TARGET_BASE/tmp"
+          
+          # Create deployments.log if it doesn't exist
+          sudo touch "$TARGET_BASE/deployments.log"
+          
+          # Set proper permissions (adjust as needed for your user)
+          sudo chown -R $USER:$USER "$TARGET_BASE" || true
+          sudo chmod -R 755 "$TARGET_BASE"
+          
+          echo "Project structure created:"
+          ls -la "$TARGET_BASE/"
+          
+          # Set output for use in subsequent steps
+          echo "target_base=$TARGET_BASE" >> $GITHUB_OUTPUT
+
+      - name: Verify project directory exists on Pi
+        shell: bash
+        run: |
+          TARGET_BASE="${{ steps.setup-dirs.outputs.target_base }}"
+          PI_PROJECT_NAME="${{ needs.validate.outputs.pi_project_name }}"
+          echo "Verifying project directory: $TARGET_BASE"
+          echo "Project name: $PI_PROJECT_NAME"
+          test -d "$TARGET_BASE" || (echo "Base directory missing"; exit 1)
+          test -d "$TARGET_BASE/models" || (echo "Models directory missing"; exit 1)
+          test -d "$TARGET_BASE/manifests" || (echo "Manifests directory missing"; exit 1)
+          test -d "$TARGET_BASE/tmp" || (echo "Temp directory missing"; exit 1)
+          test -f "$TARGET_BASE/deployments.log" || (echo "Deployments log missing"; exit 1)
+          echo "✓ All project directories verified"
+
+      - name: Verify sha256 on Pi (integrity check)
+        id: verify
+        shell: bash
+        run: |
+          set -e
+          FILE="$(find . -maxdepth 4 -type f -name '*.onnx' | head -n1)"
+          echo "File: $FILE"
+          echo "Source: ${{ needs.validate.outputs.source_repo }}"
+          echo "Release: ${{ needs.validate.outputs.source_tag }}"
+          SHA_LOCAL="$(sha256sum "$FILE" | cut -d' ' -f1)"
+          SHA_EXPECT="${{ needs.validate.outputs.model_sha }}"
+          echo "Local: $SHA_LOCAL"
+          echo "Expect: $SHA_EXPECT"
+          test "$SHA_LOCAL" = "$SHA_EXPECT" || (echo "SHA256 mismatch"; exit 1)
+          echo "ok=true" >> $GITHUB_OUTPUT
+
+      - name: Idempotency check (skip if already current)
+        id: idem
+        shell: bash
+        run: |
+          set -e
+          TARGET_BASE="${{ steps.setup-dirs.outputs.target_base }}"
+          EXPECT="${{ needs.validate.outputs.model_sha }}"
+          SOURCE_REPO="${{ needs.validate.outputs.source_repo }}"
+          MODEL_FILE="${{ needs.validate.outputs.model_name }}"
+          RELEASE_TAG="${{ needs.validate.outputs.source_tag }}"
+          
+          if [ -L "$TARGET_BASE/current.onnx" ]; then
+            CUR="$(readlink -f "$TARGET_BASE/current.onnx")"
+            CUR_SHA="$(sha256sum "$CUR" | cut -d' ' -f1)"
+            echo "Current: $CUR_SHA"
+            echo "Expect:  $EXPECT"
+            echo "Source:  $SOURCE_REPO"
+            echo "Release: $RELEASE_TAG"
+            if [ "$CUR_SHA" = "$EXPECT" ]; then
+              echo "skip=true" >> $GITHUB_OUTPUT
+              echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) ALREADY-CURRENT model_id=$EXPECT source=$SOURCE_REPO release=$RELEASE_TAG" >> "$TARGET_BASE/deployments.log"
+              exit 0
+            fi
+          fi
+          echo "skip=false" >> $GITHUB_OUTPUT
+
+      - name: Check free disk space (need > 200MB)
+        if: steps.idem.outputs.skip != 'true'
+        shell: bash
+        run: |
+          TARGET_BASE="${{ steps.setup-dirs.outputs.target_base }}"
+          AVAIL_KB=$(df -Pk "$TARGET_BASE" | awk 'NR==2{print $4}')
+          REQ_KB=200000
+          echo "Available: ${AVAIL_KB} KB"
+          if [ "$AVAIL_KB" -lt "$REQ_KB" ]; then
+            echo "Not enough disk space for safe deploy"; exit 1
+          fi
+
+      - name: Stage, move, and atomic switch
+        if: steps.idem.outputs.skip != 'true'
+        shell: bash
+        run: |
+          set -e
+          FILE="$(find . -maxdepth 4 -type f -name '*.onnx' | head -n1)"
+          MODEL_ID="${{ needs.validate.outputs.model_sha }}"
+          SHORT="${{ needs.validate.outputs.short_sha }}"
+          STAMP="${{ needs.validate.outputs.utc_stamp }}"
+          SOURCE_REPO="${{ needs.validate.outputs.source_repo }}"
+          RELEASE_TAG="${{ needs.validate.outputs.source_tag }}"
+          MODEL_FILE="${{ needs.validate.outputs.model_name }}"
+          MODEL_BASENAME="${MODEL_FILE%.*}"
+          PI_PROJECT_NAME="${{ needs.validate.outputs.pi_project_name }}"
+          TARGET_BASE="${{ steps.setup-dirs.outputs.target_base }}"
+          
+          # Use original model name + timestamp + short sha for unique filename
+          FINAL="$TARGET_BASE/models/${MODEL_BASENAME}-${STAMP}-${SHORT}.onnx"
+          MANIFEST_FINAL="$TARGET_BASE/manifests/${MODEL_BASENAME}-${MODEL_ID}.json"
+
+          echo "Deploying model from: $SOURCE_REPO"
+          echo "Release version: $RELEASE_TAG"
+          echo "Pi project directory: $PI_PROJECT_NAME"
+          echo "Original model name: $MODEL_FILE"
+          echo "Target base: $TARGET_BASE"
+          echo "Final path: $FINAL"
+
+          # Stage the file
+          STAGE="$TARGET_BASE/tmp/$MODEL_ID"
+          echo "Staging at: $STAGE"
+          sudo mkdir -p "$STAGE"
+          sudo cp "$FILE" "$STAGE/model.onnx"
+          sudo cp manifest.json "$STAGE/manifest.json"
+
+          # Move to final location
+          sudo mv "$STAGE/model.onnx" "$FINAL"
+          sudo mv "$STAGE/manifest.json" "$MANIFEST_FINAL"
+          sudo rmdir "$STAGE" || true
+
+          # Update symlinks
+          if [ -L "$TARGET_BASE/current.onnx" ]; then
+            OLD="$(readlink -f "$TARGET_BASE/current.onnx")"
+            sudo ln -sfn "$OLD" "$TARGET_BASE/previous.onnx"
+          fi
+
+          sudo ln -sfnr "$FINAL" "$TARGET_BASE/current.onnx"
+
+          # Log the deployment
+          echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) DEPLOY model_id=${MODEL_ID} source=${SOURCE_REPO} release=${RELEASE_TAG} project=${PI_PROJECT_NAME} file=$(basename "$FINAL")" | sudo tee -a "$TARGET_BASE/deployments.log" > /dev/null
+
+          echo "current.onnx -> $(readlink -f "$TARGET_BASE/current.onnx")"
+          [ -L "$TARGET_BASE/previous.onnx" ] && echo "previous.onnx -> $(readlink -f "$TARGET_BASE/previous.onnx")" || echo "previous.onnx not set (first deploy)"
+
+      - name: Retain last 10 models (prune older)
+        if: steps.idem.outputs.skip != 'true'
+        shell: bash
+        run: |
+          set -e
+          TARGET_BASE="${{ steps.setup-dirs.outputs.target_base }}"
+          MODELS_DIR="$TARGET_BASE/models"
+          cd "$MODELS_DIR" || exit 0
+          
+          # Get all model files, sorted by time (newest first)
+          ls -1t *.onnx > /tmp/models_all.txt 2>/dev/null || true
+          head -n 10 /tmp/models_all.txt > /tmp/keep.txt 2>/dev/null || true
+          tail -n +11 /tmp/models_all.txt > /tmp/cand_delete.txt 2>/dev/null || true
+
+          CUR="$(readlink -f "$TARGET_BASE/current.onnx")"
+          PREV="$(readlink -f "$TARGET_BASE/previous.onnx" 2>/dev/null || true)"
+
+          while read -r f; do
+            [ -z "$f" ] && continue
+            ABS="$MODELS_DIR/$f"
+            [ "$ABS" = "$CUR" ] && { echo "Keep (current): $f"; continue; }
+            [ -n "$PREV" ] && [ "$ABS" = "$PREV" ] && { echo "Keep (previous): $f"; continue; }
+            echo "Deleting old model: $f"
+            sudo rm -f -- "$ABS"
+            # Also delete corresponding manifest
+            MANIFEST_NAME="${f%.*}"  # Remove .onnx extension
+            sudo rm -f "$TARGET_BASE/manifests/$MANIFEST_NAME-*.json" 2>/dev/null || true
+          done < /tmp/cand_delete.txt
+
+      - name: List project directory (for sanity)
+        run: |
+          TARGET_BASE="${{ steps.setup-dirs.outputs.target_base }}"
+          PI_PROJECT_NAME="${{ needs.validate.outputs.pi_project_name }}"
+          echo "Project: $PI_PROJECT_NAME"
+          echo "Model source: ${{ needs.validate.outputs.source_repo }}"
+          echo "Release: ${{ needs.validate.outputs.source_tag }}"
+          echo "Base directory: $TARGET_BASE"
+          echo "=== Directory Structure ==="
+          ls -la "$TARGET_BASE/"
+          echo "=== Models ==="
+          ls -la "$TARGET_BASE/models/" || echo "No models directory"
+          echo "=== Manifests ==="
+          ls -la "$TARGET_BASE/manifests/" || echo "No manifests directory"
+          echo "=== Symlinks ==="
+          ls -la "$TARGET_BASE/current.onnx" 2>/dev/null || echo "No current.onnx symlink"
+          ls -la "$TARGET_BASE/previous.onnx" 2>/dev/null || echo "No previous.onnx symlink"
