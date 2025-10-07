@@ -1,0 +1,1 @@
+ultralytics # this is for sample yolo model generation under /Model_dev
