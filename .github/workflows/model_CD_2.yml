@@ -1,4 +1,4 @@
-name: Model CD - Deploy ONNX Model to Pi
+name: Model CD 2- Deploy ONNX Model to Pi
 
 on:
   workflow_dispatch:
@@ -8,7 +8,7 @@ on:
         required: false
         default: 'latest'
       pi-project-dir:
-        description: 'Project directory on Pi'
+        description: 'Project directory on Pi. Leave empty to pick the Project repo name'
         required: false
         default: ''
 
@@ -40,7 +40,7 @@ jobs:
         run: |
           # Determine project directory name
           if [ -z "${{ github.event.inputs.pi-project-dir }}" ]; then
-            PI_PROJECT_NAME="${{ github.repository }}"
+            PI_PROJECT_NAME=""$REPO""
             echo "Using repository name as project directory: $PI_PROJECT_NAME"
           else
             PI_PROJECT_NAME="${{ github.event.inputs.pi-project-dir }}"
