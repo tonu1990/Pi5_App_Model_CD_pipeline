@@ -18,7 +18,7 @@ on:
         required: false
         default: 'latest'
       pi-project-dir:
-        description: 'Model Artifacts directory on Pi'
+        description: 'Model Artifacts directory on Pi.Leave empty to pick the Project repo name'
         required: false
         default: ''
       artifact_glob:
@@ -235,7 +235,6 @@ jobs:
         run: |
           echo "tag_name=latest" >> $GITHUB_OUTPUT
           echo "asset_name=${{ steps.find-onnx.outputs.model_name }}" >> $GITHUB_OUTPUT
-          # For GithubRepo mode, we'll handle the download differently
 
       - name: Download ONNX asset (GithubRelease mode)
         id: download-release
@@ -286,7 +285,7 @@ jobs:
           SHA=$(sha256sum "$MODEL_PATH" | cut -d' ' -f1)
           echo "sha256: $SHA"
           echo "Source: ${{ github.repository }}"
-          echo "Release: ${{ fromJSON(steps.rel.outputs.tag_name || steps.upload-release.outputs.tag_name || 'latest') }}"
+          echo "Release: ${{ steps.rel.outputs.tag_name || steps.upload-release.outputs.tag_name || 'latest' }}"
           echo "$SHA  $(basename "$MODEL_PATH")" > sha256.txt
           echo "model_sha=$SHA" >> $GITHUB_OUTPUT
           echo "short_sha=${SHA:0:12}" >> $GITHUB_OUTPUT
