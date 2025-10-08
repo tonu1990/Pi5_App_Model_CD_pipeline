@@ -13,41 +13,10 @@ This template provides **two deployment lanes** and a **one‑time runner setup*
 3) **Set up Self‑Hosted Runner** (one‑time on the Pi so GitHub Actions can target it)
 
 For a quick visual, here’s the high‑level architecture:
+## Architecture Overview
 
-```mermaid
-flowchart LR
-  subgraph GH["GitHub"]
-    A[Repo: Code & Artifacts]:::repo
-    R[Releases (Models)]:::store
-    C[GHCR (App Images)]:::store
-  end
-
-  subgraph WF["GitHub Actions Workflows"]
-    M1[[Model_CD<br/>Prepare bundle]]:::job
-    W1[[App_CD Web<br/>Deploy container]]:::job
-    G1[[App_CD GUI<br/>Install launcher]]:::job
-  end
-
-  subgraph PI["Raspberry Pi (Self‑Hosted Runner)"]
-    FS[/ /opt/edge/&lt;project&gt;<br/>models/ manifests/ tmp/<br/>current.onnx → previous.onnx /]:::state
-    APP[(Docker Container<br/>Web API/UI or GUI)]:::state
-  end
-
-  A --> M1
-  R --> M1
-  M1 -->|.onnx + manifest + sha256| FS
-  FS -->|MODEL_PATH=/models/current.onnx (ro)| APP
-  C --> W1
-  C --> G1
-  W1 --> APP
-  G1 --> APP
-
-  classDef repo fill:#eaf5ff,stroke:#3b82f6,color:#111;
-  classDef store fill:#f5f3ff,stroke:#7c3aed,color:#111;
-  classDef job fill:#ecfdf5,stroke:#10b981,color:#111;
-  classDef state fill:#fff7ed,stroke:#f59e0b,color:#111;
-```
----
+![CI/CD Pipeline Flowchart](readme_images/architecture.png)
+![CI/CD Pipeline Flowchart](readme_images\architecture.png)
 
 ### **1. Model Deployement lane - Model_CD**
 See **Actions** in this repo → workflow **“Model CD - Deploy Model (.ONNX) and labels.json to Pi”** (defined at `.github/workflows/model_CD.yml`).

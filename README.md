@@ -107,3 +107,5 @@ The command will look like ***"curl -o actions-runner-linux-arm64-2.328.0.tar.gz
         To remove configurations set in step 8. You will have to give the token used for setup
 
 
+![CI/CD Pipeline Flowchart](readme_images/architecture.png)
+![CI/CD Pipeline Flowchart](readme_images\architecture.png)
