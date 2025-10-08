@@ -38,7 +38,7 @@ User can choose the Model directory in Pi where the model and artifacts will be 
 
 ---
 ## **Model directory layout on Pi (reference)**
-
+```
 /opt/edge/<project>/
 ├─ models/               # versioned .onnx files
 ├─ manifests/            # one manifest per deployed model
@@ -47,7 +47,7 @@ User can choose the Model directory in Pi where the model and artifacts will be 
 ├─ previous.onnx -> models/<...>.onnx # previous model (symlink, if any)
 ├─ deployments.log
 └─ labels.json           # optional
-
+```
 ### **2. Application Deployment lane - App_CD**
 This lane is for deploying the multi‑arch Docker image (**amd64/arm64**) of the App from **GHCR** to the Pi 5.  
 So **to use this template, build your final Web/GUI application (with ONNX Runtime) as a multi‑arch Docker image and push it to GHCR**.
