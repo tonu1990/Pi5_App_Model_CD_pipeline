@@ -16,7 +16,6 @@ For a quick visual, here’s the high‑level architecture:
 ## Architecture Overview
 
 ![CI/CD Pipeline Flowchart](readme_images/architecture.png)
-![CI/CD Pipeline Flowchart](readme_images\architecture.png)
 
 ### **1. Model Deployement lane - Model_CD**
 See **Actions** in this repo → workflow **“Model CD - Deploy Model (.ONNX) and labels.json to Pi”** (defined at `.github/workflows/model_CD.yml`).
@@ -38,6 +37,16 @@ User can choose the Model directory in Pi where the model and artifacts will be 
 - On the Pi: verifies checksum, **idempotency check**, free‑space check, versioned copy, **atomic symlink swap** (`current.onnx` → new, preserve `previous.onnx`), **retain last 10** models, and append to `deployments.log`.
 
 ---
+## **Model directory layout on Pi (reference)**
+```
+/opt/edge/<project>/
+├─ models/               # versioned .onnx files
+├─ manifests/            # one manifest per deployed model
+├─ tmp/                  # staging during deploy
+├─ current.onnx -> models/<...>.onnx  # active model (symlink)
+├─ previous.onnx -> models/<...>.onnx # previous model (symlink, if any)
+├─ deployments.log
+└─ labels.json           # optional
 
 ### **2. Application Deployment lane - App_CD**
 This lane is for deploying the multi‑arch Docker image (**amd64/arm64**) of the App from **GHCR** to the Pi 5.  
@@ -45,8 +54,34 @@ So **to use this template, build your final Web/GUI application (with ONNX Runti
 
 There are **two workflows** under this lane:
 
-#### **2.1 Web App CD – Deploy Web App Image from GHCR to Pi5**
-**Workflow:** `.github/workflows/deploy-to-pi5.yml`
+#### **2.1 GUI App CD – Launcher Script with Icons to Pi**
+**Workflow:** `.github\workflows\app_CD_GUI.yml`
+
+**Purpose**  
+Install a **click‑to‑run launcher** and **desktop/menu icons** so non‑technical users can start the GUI container from the Raspberry Pi desktop.
+
+**Inputs (typical)**  
+- **image-name** (`ghcr.io/...`), **tag** (`latest`), **container-name** (also used as the menu/desktop label),  
+- **model-mount-dir** (default `/opt/edge/<repo_name>`), **extra-args** (e.g., camera/GPU flags).
+
+**What it installs**  
+- `/usr/local/bin/<slug>.sh` – a launcher script that:  
+  - auto‑detects `/dev/video*` (or uses `$CAM_DEVICE`),  
+  - sets X11 env (`DISPLAY`, XDG dirs),  
+  - can run the container **as the current user**,  
+  - mounts the model base as **read‑only** at `/models`,  
+  - sets `MODEL_DIR=/models`, `MODEL_PATH=/models/current.onnx`.
+- System menu entry: `/usr/share/applications/<slug>.desktop` (icon appears in the desktop/menu).  
+- Uninstall helper: `/usr/local/sbin/<slug>_uninstall.sh` + menu entry (uses `pkexec`).
+
+**Runtime notes**  
+- Requires access to X11 (`/tmp/.X11-unix`) and camera device (adds `--group-add video`).  
+- You can override the host model directory at launch with env var `MODEL_MOUNT_DIR` if needed.
+
+---
+
+#### **2.2 Web App CD – Deploy Web App Image from GHCR to Pi5**
+**Workflow:** `.github\workflows\app_CD_WEB.yml`
 
 **Purpose**  
 Run your web application container on the Pi and expose it on a chosen host port.
@@ -74,33 +109,6 @@ Run your web application container on the Pi and expose it on a chosen host port
 
 **App contract (expected)**  
 Your app should read the model from the environment variable **`MODEL_PATH`**. Keep the container’s internal port (`APP_PORT`) stable or pass it via `.env`.
-
----
-
-#### **2.2 GUI App CD – Launcher Script with Icons to Pi**
-**Workflow:** `.github/workflows/deploy-gui-launcher.yml`
-
-**Purpose**  
-Install a **click‑to‑run launcher** and **desktop/menu icons** so non‑technical users can start the GUI container from the Raspberry Pi desktop.
-
-**Inputs (typical)**  
-- **image-name** (`ghcr.io/...`), **tag** (`latest`), **container-name** (also used as the menu/desktop label),  
-- **model-mount-dir** (default `/opt/edge/<repo_name>`), **extra-args** (e.g., camera/GPU flags).
-
-**What it installs**  
-- `/usr/local/bin/<slug>.sh` – a launcher script that:  
-  - auto‑detects `/dev/video*` (or uses `$CAM_DEVICE`),  
-  - sets X11 env (`DISPLAY`, XDG dirs),  
-  - runs the container **as the current user**,  
-  - mounts the model base as **read‑only** at `/models`,  
-  - sets `MODEL_DIR=/models`, `MODEL_PATH=/models/current.onnx`,  
-  - logs to `/tmp/<slug>.log`.
-- System menu entry: `/usr/share/applications/<slug>.desktop` (icon appears in the desktop/menu).  
-- Uninstall helper: `/usr/local/sbin/<slug>_uninstall.sh` + menu entry (uses `pkexec`).
-
-**Runtime notes**  
-- Requires access to X11 (`/tmp/.X11-unix`) and camera device (adds `--group-add video`).  
-- You can override the host model directory at launch with env var `MODEL_MOUNT_DIR` if needed.
 
 ---
 
@@ -145,32 +153,6 @@ sudo usermod -aG docker $USER && newgrp docker
 docker info
 ```
 
----
-
-## **Repository variables and .env**
-- **Repository variable**: `IMAGE_NAME` (e.g., `ghcr.io/<owner>/<app>`), used by **Web App CD** if `image-name` input is blank.  
-- **Optional `.env` (repo)** for **Web App CD** (loaded on the Pi):
-  - `APP_NAME` – default container name.  
-  - `HOST_PORT` – default host port (fallback `8000`).  
-  - `APP_PORT` – container’s internal port (fallback `8080`).  
-- Prefer **GitHub Secrets** for credentials; pass them via `extra-args` (e.g., `--env API_KEY=${{ secrets.API_KEY }}`).
-
----
-
-## **Model directory layout on Pi (reference)**
-```
-/opt/edge/<project>/
-├─ models/               # versioned .onnx files
-├─ manifests/            # one manifest per deployed model
-├─ tmp/                  # staging during deploy
-├─ current.onnx -> models/<...>.onnx  # active model (symlink)
-├─ previous.onnx -> models/<...>.onnx # previous model (symlink, if any)
-├─ deployments.log
-└─ labels.json           # optional
-```
-
----
-
 ## **Quick start**
 1) **Runner**: complete the self‑hosted runner setup (labels: `pi5, app_model_cd`).  
 2) **Model**: publish your `.onnx` (Release or repo path).  
@@ -180,13 +162,3 @@ docker info
 
 ---
 
-## **Troubleshooting (common)**
-- **Port already in use**: the Web workflow will fail with a conflict; pick another `host-port` or stop the conflicting container.  
-- **No `current.onnx`**: Model not deployed yet—run **Model_CD** first (or link one manually).  
-- **Runner shows Offline**: `sudo ./svc.sh start` on the Pi, or re‑enable the systemd service.  
-- **Permission denied (Docker)**: add runner user to `docker` group (`sudo usermod -aG docker $USER && newgrp docker`).  
-- **Private images**: Web/GUI flows log in to **GHCR** using `GITHUB_TOKEN`; ensure the repo has access to the image.
-
----
-
-**That’s it.** You now have a simple, reliable Edge‑AI delivery system: ship models independently, deploy web or GUI apps, and operate safely with atomic swaps and quick rollbacks on the Pi.
