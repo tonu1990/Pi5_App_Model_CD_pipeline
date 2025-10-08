@@ -209,14 +209,14 @@ docker info
 ---
 
 #### **6) Deploy the application (pick one lane)**
-### **Web App**
+ **Web App**
 Run **“Web App CD to Pi- Deploy Web App Image from GHCR to Pi5”**  
 - `IMAGE_NAME` provide a full ref (e.g., `ghcr.io/<owner>/<repo>`).
 - Choose `host-port` .
 - Leave `model-mount-dir` blank to use `/opt/edge/<repo_name>`.
 - The workflow will start a container and map **`HOST_PORT:APP_PORT`**.
 
-### **GUI App**
+ **GUI App**
 Run **“GUI App CD - Launcher Script with Icons to Pi”**  
 - Provide `image-name` and (optionally) `container-name` → becomes the desktop/menu label.
 - After completion, launch the app from the **desktop icon** or menu on the Pi.
