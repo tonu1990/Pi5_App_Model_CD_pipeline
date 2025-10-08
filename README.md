@@ -1,119 +1,242 @@
 # **Pi5_App_Model_CD_pipeline**
-Orchestration repo for deploying Edge AI app and model to Raspberry Pi using Self hosted runners
+Orchestration repo for deploying an Edge‑AI **model** and **application** to a Raspberry Pi using **GitHub Actions** with a **self‑hosted runner** on the Pi.
 
-The Raspberry Pi used during the developement of this pipeline - Pi5/8GB
+The reference device used while developing this pipeline: **Raspberry Pi 5 / 8GB**.
+
+---
 
 ## **Project design**
-The template comes with two workflows ; 
+This template provides **two deployment lanes** and a **one‑time runner setup**:
 
-**1. Model_CD**
+1) **Model Deployment lane – Model_CD** (ships your trained `.onnx` + metadata to the Pi)  
+2) **Application Deployment lane – App_CD** (runs your app container on the Pi: **Web** or **GUI**)  
+3) **Set up Self‑Hosted Runner** (one‑time on the Pi so GitHub Actions can target it)
 
-See Actions tab under the project Repo - look for workflow **"Model CD - Ship latest ONNX model Pi"**. The workflow is defined at .github/workflows/model_CD_pi.yml
+For a quick visual, here’s the high‑level architecture:
+## Architecture Overview
 
-This workflow pulls the final .ONNX model from GitHub Releases, validates it, then ships it to the Pi 5 via a self-hosted runner.
+![CI/CD Pipeline Flowchart](readme_images/architecture.png)
 
-So to you use this template
+### **1. Model Deployement lane - Model_CD**
+See **Actions** in this repo → workflow **“Model CD - Deploy Model (.ONNX) and labels.json to Pi”** (defined at `.github/workflows/model_CD.yml`).
 
- **1.the final model (.ONNX format) after model training and validation has to be made available to Github release** for deploying the model to Pi5.
+This workflow picks the final model (`.onnx`) and ships it to the Pi 5 via the self‑hosted runner.
 
- **2.the Model directory (the directory name at Pi where the .ONNX model and its related files will be stored) must be defined in .env file of the project teamplate. Bu default it is set as opt/edge/models in .env**
+While you use this template ensure the below:
 
-**2.the following Model directories must be present in Raspberry Pi opt/edge/models ,/opt/edge/models/models ,/opt/edge/models/manifests** - this step explained later.
+**1. Model Availability**  
+The final model after training and validation has to be made available to **GitHub Release** or **inside the repo (preferably at `/Model_dev/artifacts`)** for deploying the model to Pi5 (`.onnx` format preferred for Raspberry Pi). Optional to keep **label file (`.json`)** as well.
 
-Please read the readme file under Model_dev section for specific points to keep in mind when you are trianing your model.
+**2. Model directory in Pi**  
+User can choose the Model directory in Pi where the model and artifacts will be stored. They will have to ensure they mount this directory at application runtime. The following model items will be present on Raspberry Pi:  
+`<pi5_dir_location>/models`, `<pi5_dir_location>/manifests`, `<pi5_dir_location>/deployments.log`, `<pi5_dir_location>/current.onnx`, `<pi5_dir_location>/labels.json` (optional).
 
+**What the workflow does (summary)**  
+- Supports **two sources**: pull ONNX from a **GitHub Release** or pick it from the **repo** and upload to the `latest` release.  
+- Computes **sha256** (model identity), writes a **manifest.json**, and uploads a bundle.  
+- On the Pi: verifies checksum, **idempotency check**, free‑space check, versioned copy, **atomic symlink swap** (`current.onnx` → new, preserve `previous.onnx`), **retain last 10** models, and append to `deployments.log`.
 
-**2.App CD**
+---
+## **Model directory layout on Pi (reference)**
+```
+/opt/edge/<project>/
+├─ models/               # versioned .onnx files
+├─ manifests/            # one manifest per deployed model
+├─ tmp/                  # staging during deploy
+├─ current.onnx -> models/<...>.onnx  # active model (symlink)
+├─ previous.onnx -> models/<...>.onnx # previous model (symlink, if any)
+├─ deployments.log
+└─ labels.json           # optional
+```
+### **2. Application Deployment lane - App_CD**
+This lane is for deploying the multi‑arch Docker image (**amd64/arm64**) of the App from **GHCR** to the Pi 5.  
+So **to use this template, build your final Web/GUI application (with ONNX Runtime) as a multi‑arch Docker image and push it to GHCR**.
 
-See Actions tab under the project Repo and look for workflow **"App CD - Deploy App Image from GHCR to Pi5"**. The workflow is defined at .github/workflows/app_CD.yml.
+There are **two workflows** under this lane:
 
-This workflow deploys the multi-arch Docker image (amd64/arm64) of the App present in GHCR to the Pi5.
+#### **2.1 GUI App CD – Launcher Script with Icons to Pi**
+**Workflow:** `.github\workflows\app_CD_GUI.yml`
 
-So **to you use this template, the final WebApplication along with ONNX runtime has to be build as a multi-arch Docker image (amd64/arm64) and pushed to GHCR** for deploying the App to Pi5.
+**Purpose**  
+Install a **click‑to‑run launcher** and **desktop/menu icons** so non‑technical users can start the GUI container from the Raspberry Pi desktop.
 
-Please read readme file under App_dev section for specific points to keep in mind when you are developing and testing your App.
+**Inputs (typical)**  
+- **image-name** (`ghcr.io/...`), **tag** (`latest`), **container-name** (also used as the menu/desktop label),  
+- **model-mount-dir** (default `/opt/edge/<repo_name>`), **extra-args** (e.g., camera/GPU flags).
 
-### **One time set up in Raspberry Pi**
+**What it installs**  
+- `/usr/local/bin/<slug>.sh` – a launcher script that:  
+  - auto‑detects `/dev/video*` (or uses `$CAM_DEVICE`),  
+  - sets X11 env (`DISPLAY`, XDG dirs),  
+  - can run the container **as the current user**,  
+  - mounts the model base as **read‑only** at `/models`,  
+  - sets `MODEL_DIR=/models`, `MODEL_PATH=/models/current.onnx`.
+- System menu entry: `/usr/share/applications/<slug>.desktop` (icon appears in the desktop/menu).  
+- Uninstall helper: `/usr/local/sbin/<slug>_uninstall.sh` + menu entry (uses `pkexec`).
 
-#### **1.Set up Pi directories**
+**Runtime notes**  
+- Requires access to X11 (`/tmp/.X11-unix`) and camera device (adds `--group-add video`).  
+- You can override the host model directory at launch with env var `MODEL_MOUNT_DIR` if needed.
 
---- add ---
+---
 
-#### **2.Set up Self Hosted Runner**
-The prerequiste for the above two piplelines is to establish an active connection between our Github repo and the Raspberry Pi (where we deploy our App and Model). 
+#### **2.2 Web App CD – Deploy Web App Image from GHCR to Pi5**
+**Workflow:** `.github\workflows\app_CD_WEB.yml`
 
-We use **self hosted runners** for this . Setting up a self-hosted runner provides you with the flexibility to run workflows on your own hardware.
+**Purpose**  
+Run your web application container on the Pi and expose it on a chosen host port.
 
-Below given is the step by step approach we need to follow to set up self hosted runner in Raspberry Pi. 
+**Inputs (typical)**  
+- **image-name**: Application image (e.g., `ghcr.io/<owner>/<app>`). If blank, uses repo variable `IMAGE_NAME`.  
+- **tag**: Image tag (default `latest`).  
+- **container-name**: Name for the container (blank → `.env: APP_NAME` → `pi_app`).  
+- **host-port**: Port on the Pi (blank → `.env: HOST_PORT` → `8000`).  
+- **model-mount-dir**: Model base dir on the Pi (blank → `/opt/edge/<repo_name>`).  
+- **extra-args**: Extra `docker run` args (e.g., `--env KEY=VAL`).
 
-1. Open the Github repo -> Settings -> Actions -> Runners -> New Self Hosted Runner -> Select Linux under Runner Image-> Select ARM64 from Architecture drop down. After this step , you will see the commands (to do in Pi). Keep this open for later reference.
+**Behavior (summary)**  
+1) Resolves parameters from inputs / repo variables / `.env`.  
+2) Logs into **GHCR**, pulls the image, and removes any old container with the same name.  
+3) Checks for **host‑port conflicts**.  
+4) Verifies the **model base directory** and shows the `current.onnx` symlink if present.  
+5) Runs the container with:  
+   - `-p <HOST_PORT>:<APP_PORT>` (where `APP_PORT` comes from `.env` or defaults to **8080**)  
+   - `-e MODEL_PATH="<MODEL_DIR>/current.onnx"`  
+   - `-v <MODEL_DIR>:<MODEL_DIR>:ro` (read‑only mount)  
+   - any `extra-args` you provide  
+6) Verifies the container is **running**, performs a light **health check** (`/health` or `/`).  
+7) Optionally **cleans up older images** and posts a **Deployment Summary**.
 
-2. Log in into Raspberry Pi, and open Terminal (use ssh from your local or RealVNC to connect to Pi5 )
+**App contract (expected)**  
+Your app should read the model from the environment variable **`MODEL_PATH`**. Keep the container’s internal port (`APP_PORT`) stable or pass it via `.env`.
 
-3. Command "***mkdir /opt/edge/app_model_cd_runner***" in Pi - this creates a folder for runner in Pi . 
+---
 
-4. Command "***cd /opt/edge/app_model_cd_runner***" in Pi.
+### **3. Set up Self Hosted Runner (one‑time)**
+Both lanes run **on your Pi** via a GitHub **self‑hosted runner**—a small agent that lets Actions execute jobs on your own hardware.
 
-5. Download the latest runner package to the folder - to do this go back to the Github repo commands opened in Step 1.  Look for the command under # Download the latest runner package .
-The command will look like ***"curl -o actions-runner-linux-arm64-2.328.0.tar.gz -L https://github.com/actions/runner/releases/download/v2.328.0/actions-runner-linux-arm64-2.328.0.tar.gz"*** . Run that in Pi.
+**Steps (Pi 5, ARM64):**
+1. In your GitHub repo: **Settings → Actions → Runners → New self‑hosted runner** → Image: **Linux**, Architecture: **ARM64**. Keep the generated commands open.  
+2. On the Pi (SSH or local Terminal):  
+   ```bash
+   sudo mkdir -p /opt/edge/app_model_cd_runner
+   cd /opt/edge/app_model_cd_runner
+   # Download the ARM64 runner (version from step 1)
+   curl -o actions-runner-linux-arm64-<ver>.tar.gz -L https://github.com/actions/runner/releases/download/v<ver>/actions-runner-linux-arm64-<ver>.tar.gz
+   # (Optional) Validate checksum
+   echo "<sha256>  actions-runner-linux-arm64-<ver>.tar.gz" | shasum -a 256 -c
+   tar xzf actions-runner-linux-arm64-<ver>.tar.gz
+   # Configure (use your repo URL + token + labels)
+   ./config.sh --url https://github.com/<owner>/<repo> --token <REG_TOKEN> --name <runner_name> --labels "pi5,app_model_cd" --unattended
+   # Install as a service
+   sudo ./svc.sh install
+   sudo ./svc.sh start
+   sudo ./svc.sh status
+   ```
+3. Verify in **Settings → Actions → Runners** that your runner is **Idle** and labeled `pi5, app_model_cd`.  
+4. (Recommended) Auto‑start on boot:  
+   ```bash
+   # Find the service name at /etc/systemd/system, then enable:
+   sudo systemctl enable actions.runner.<owner>-<repo>.<runner_name>.service
+   ```
+**Useful commands**
+```bash
+# Stop / uninstall the service
+sudo ./svc.sh stop
+sudo ./svc.sh uninstall
 
-6. Optional: Validate the hash (command will look like echo "b801b9809c4d9301932bccadf57ca13533073b2aa9fa9b8e625a8db905b5d8eb  actions-runner-linux-arm64-2.328.0.tar.gz" | shasum -a 256 -c).
+# Remove configuration
+./config.sh remove
 
-7. Extract the installer - After step 5, now you can see the runner package as a zip file under the folder /opt/edge/app_model_cd_runner. Unzip that using "***tar xzf ./actions-runner-linux-arm64-2.328.0.tar.gz***"
+# Ensure the runner user can use Docker without sudo
+sudo usermod -aG docker $USER && newgrp docker
+docker info
+```
 
-8. Create the runner and start the configuration . The command will look something like ***./config.sh --url https://github.com/<your github repo> --token XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX***. We will execute an extended version of this command as below;
+### **4.Quick start (all-in-one in this repo)**
 
-    ***./config.sh --url https://github.com/<your github repo> --token XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX --name <runner_name> --labels "pi5,app_model_cd" --unattended***
+**Goal:** Clone this template into your own GitHub repo, set up the Pi runner once, then use the included workflows to deliver **models** and **apps** to your Raspberry Pi.
 
-    where name can be set as per requirement. The labels ***pi5,app_model_cd*** has to be set the same way as these values will be used during workflow run in Github actions.
+---
 
-    Example : ***./config.sh --url https://github.com/tonu1990/Pi5_App_Model_CD_pipeline --token AN2Q6IQWYOX7ITMWWOSF6C3IX6U6Q  --name tonzz-pi --labels "pi5,app_model_cd" --unattended***
+#### **0) Prerequisites**
+- Raspberry Pi **5 (64-bit OS)** with **Docker** installed and working.
+- Network access between GitHub and the Pi.
+- A GitHub account with permission to create repos and run Actions.
 
-9. Run the self hosted runner . There are two ways to do it . ***./run.sh*** as shown in Github repo steps. This will start the runner procees in the foreground. But we need to run the process in background, and for our use case we wil prefer that approach . For that execute below commands
+---
 
-     ***sudo ./svc.sh install***
+#### **1) Create your repo from this template**
+- On GitHub, click **Use this template** → create your new repo (owner/visibility as you like).
 
-     ***sudo ./svc.sh start***
+---
 
-     ***sudo ./svc.sh status***
+#### **2) One-time: Set up the self-hosted runner on the Pi**
+- Follow the steps in **“Set up Self Hosted Runner (one-time)”** from the main README.
+- Use labels: **`pi5, app_model_cd`**.
+- Confirm the runner shows **Idle** in **Settings → Actions → Runners**.
 
-10. After this step check the runners section in Github repo (Open the Github repo -> Settings -> Actions -> Runners) you can see the runner we created (with status Idle).
+---
 
-11. One potential issue we might come across here is in case the Pi is turned off and On again, the connection between the Github runner and our pi will get lost. You will see our runner with status "Offline" in Repo. We can restart the runner everytime you turn on pi - do ***sudo ./svc.sh start***. 
+#### **3) Add files to train and save your Model and finally add your model artifacts (choose one)**
+- **Option A — Release (recommended):** Publish your final **`.onnx`** (and optional `labels.json`) to this repo’s **Releases**.
+- **Option B — Repo folder:** Place files under: `Model_dev/artifacts/` (e.g., `Model_dev/artifacts/yourmodel.onnx`, `labels.json`).
 
-    If you wish to avoid this mannual restart every time, you can do step 12 , which will help to start the runner automatically at boot.
+---
 
-12. Recommended additional step :  auto-start on boot of Pi. 
+#### **4) Deploy the model to the Pi**
+- Go to **Actions** → run **“Model CD - Deploy Model (.ONNX) and labels.json to Pi”**.
+- **Inputs:**
+  - `model-source`: `GithubRelease` (reads from Releases) **or** `GithubRepo` (reads from `Model_dev/artifacts/*`).
+  - `pi-project-dir`: optional (default is repo name).
+- On success, the Pi will have:
+  - `/opt/edge/<project>/models/...`
+  - `/opt/edge/<project>/manifests/...`
+  - `/opt/edge/<project>/deployments.log`
+  - **`/opt/edge/<project>/current.onnx`** (symlink to the active model).
 
-    Find the service name for the runner - check the folder /etc/systemd/system and findout the service of our runner . The file name will look something like ***actions.runner.<github_repo>.<runner_name>.service***
+---
 
-    Enable that service as with below command ;
+#### **5) Build and publish your application image to GHCR**
+- Ensure your app **loads the model from** `MODEL_PATH` (the Web/GUI workflows set this to `/models/current.onnx`).
+- Make sure your container’s internal port matches **`APP_PORT`** (default **8080**) or set it in `.env`.
+- Example multi-arch build & push (from your dev machine with GHCR login):
+  ```bash
+  docker buildx build --platform linux/amd64,linux/arm64 \
+    -t ghcr.io/<owner>/<repo>:latest --push .
+  ```
 
-    ***sudo systemctl enable <your_service_name>***
+---
+#### **6) Deploy the application (pick one lane)**
+ **Web App**
+Run **“Web App CD to Pi- Deploy Web App Image from GHCR to Pi5”**  
+- `IMAGE_NAME` provide a full ref (e.g., `ghcr.io/<owner>/<repo>`).
+- Choose `host-port` .
+- Leave `model-mount-dir` blank to use `/opt/edge/<repo_name>`.
+- The workflow will start a container and map **`HOST_PORT:APP_PORT`**.
 
-    Example : ***systemctl enable actions.runner.tonu1990-Pi5_App_Model_CD_pipeline.tonzz-pi.service***
+ **GUI App**
+Run **“GUI App CD - Launcher Script with Icons to Pi”**  
+- Provide `image-name` and (optionally) `container-name` → becomes the desktop/menu label.
+- After completion, launch the app from the **desktop icon** or menu on the Pi.
 
+---
 
-13. Additional useful commands :
+#### **7) Verify it’s working**
+- **Web:** visit `http://<pi-hostname>:<HOST_PORT>` (or `/health` if your app exposes it).
+- **GUI:** click the desktop icon; logs are at `/tmp/<slug>.log` on the Pi.
+- On the Pi, `docker ps` shows the running container.
 
-    a. ***systemctl is-enabled <your_service_name>***
+---
 
-        To check if auto start is enabled
+#### **8) Iterate safely**
+- **New model?** Re-run **Model CD** — the app keeps reading `/models/current.onnx` (atomic swap + rollback via `previous.onnx`).
+- **New app build?** Push a new tag to GHCR and re-run the Web/GUI App workflow.
 
-    b. ***sudo systemctl disable <your_service_name>***
+---
 
-        To disable auto start.
-
-    c. ***sudo ./svc.sh stop***
-
-        To stop the self host runner set up in step 9
-
-    d. ***sudo ./svc.sh uninstal***
-
-        To uninstall host runner set up in step 9
-
-    e. ***./config.sh remove***
-
-        To remove configurations set in step 8. You will have to give the token used for setup
-
-
+#### **9) Troubleshooting (quick)**
+- **Port already in use:** choose a different `host-port` or stop the conflicting container.
+- **No `current.onnx`:** run **Model CD** first.
+- **Runner Offline:** `sudo ./svc.sh start` on the Pi (or enable the systemd service).
+- **Docker permission issues:** add runner user to `docker` group and re-login.

@@ -5,20 +5,20 @@ on:
   workflow_dispatch:
     inputs:
       image-name:
-        description: "Application image name (from GHCR) to deploy -leave blank to use repo variable IMAGE_NAME"
-        required: false
+        description: "Application image name (from GHCR) to deploy"
+        required: true
         type: string
         default: ""
       container-name:
-        description: "Name to use Pi for Application container -leave blank to use APP_NAME from .env or 'pi_app'"
+        description: "Application container name in Pi"
         required: false
         type: string
-        default: ""
+        default: "pi_app"
       host-port:
-        description: "Host port in Pi where Application is to be deployed -leave blank to use HOST_PORT from .env"
+        description: "Host port in Pi where Application is to be deployed"
         required: false
         type: string
-        default: ""
+        default: "8000"
       tag:
         description: "Image tag"
         required: false
