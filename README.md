@@ -38,7 +38,7 @@ User can choose the Model directory in Pi where the model and artifacts will be 
 
 ---
 ## **Model directory layout on Pi (reference)**
-```
+
 /opt/edge/<project>/
 ├─ models/               # versioned .onnx files
 ├─ manifests/            # one manifest per deployed model
