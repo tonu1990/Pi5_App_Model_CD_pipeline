@@ -153,38 +153,38 @@ sudo usermod -aG docker $USER && newgrp docker
 docker info
 ```
 
-# **Quick start (all-in-one in this repo)**
+### **4.Quick start (all-in-one in this repo)**
 
 **Goal:** Clone this template into your own GitHub repo, set up the Pi runner once, then use the included workflows to deliver **models** and **apps** to your Raspberry Pi.
 
 ---
 
-## **0) Prerequisites**
+#### **0) Prerequisites**
 - Raspberry Pi **5 (64-bit OS)** with **Docker** installed and working.
 - Network access between GitHub and the Pi.
 - A GitHub account with permission to create repos and run Actions.
 
 ---
 
-## **1) Create your repo from this template**
+#### **1) Create your repo from this template**
 - On GitHub, click **Use this template** → create your new repo (owner/visibility as you like).
 
 ---
 
-## **2) One-time: Set up the self-hosted runner on the Pi**
+#### **2) One-time: Set up the self-hosted runner on the Pi**
 - Follow the steps in **“Set up Self Hosted Runner (one-time)”** from the main README.
 - Use labels: **`pi5, app_model_cd`**.
 - Confirm the runner shows **Idle** in **Settings → Actions → Runners**.
 
 ---
 
-## **3) Add files to train and save your Model and finally add your model artifacts (choose one)**
+#### **3) Add files to train and save your Model and finally add your model artifacts (choose one)**
 - **Option A — Release (recommended):** Publish your final **`.onnx`** (and optional `labels.json`) to this repo’s **Releases**.
 - **Option B — Repo folder:** Place files under: `Model_dev/artifacts/` (e.g., `Model_dev/artifacts/yourmodel.onnx`, `labels.json`).
 
 ---
 
-## **5) Deploy the model to the Pi**
+#### **4) Deploy the model to the Pi**
 - Go to **Actions** → run **“Model CD - Deploy Model (.ONNX) and labels.json to Pi”**.
 - **Inputs:**
   - `model-source`: `GithubRelease` (reads from Releases) **or** `GithubRepo` (reads from `Model_dev/artifacts/*`).
@@ -197,7 +197,7 @@ docker info
 
 ---
 
-## **6) Build and publish your application image to GHCR**
+#### **5) Build and publish your application image to GHCR**
 - Ensure your app **loads the model from** `MODEL_PATH` (the Web/GUI workflows set this to `/models/current.onnx`).
 - Make sure your container’s internal port matches **`APP_PORT`** (default **8080**) or set it in `.env`.
 - Example multi-arch build & push (from your dev machine with GHCR login):
@@ -208,7 +208,7 @@ docker info
 
 ---
 
-## **7) Deploy the application (pick one lane)**
+#### **6) Deploy the application (pick one lane)**
 ### **Web App**
 Run **“Web App CD to Pi- Deploy Web App Image from GHCR to Pi5”**  
 - `IMAGE_NAME` provide a full ref (e.g., `ghcr.io/<owner>/<repo>`).
@@ -223,20 +223,20 @@ Run **“GUI App CD - Launcher Script with Icons to Pi”**
 
 ---
 
-## **8) Verify it’s working**
+#### **7) Verify it’s working**
 - **Web:** visit `http://<pi-hostname>:<HOST_PORT>` (or `/health` if your app exposes it).
 - **GUI:** click the desktop icon; logs are at `/tmp/<slug>.log` on the Pi.
 - On the Pi, `docker ps` shows the running container.
 
 ---
 
-## **9) Iterate safely**
+#### **8) Iterate safely**
 - **New model?** Re-run **Model CD** — the app keeps reading `/models/current.onnx` (atomic swap + rollback via `previous.onnx`).
 - **New app build?** Push a new tag to GHCR and re-run the Web/GUI App workflow.
 
 ---
 
-## **10) Troubleshooting (quick)**
+#### **9) Troubleshooting (quick)**
 - **Port already in use:** choose a different `host-port` or stop the conflicting container.
 - **No `current.onnx`:** run **Model CD** first.
 - **Runner Offline:** `sudo ./svc.sh start` on the Pi (or enable the systemd service).
