@@ -1,4 +1,4 @@
-name: Model Artifacts CD - Deploy Model (.ONNX) and labels.json to Pi
+name: Model CD - Deploy Model (.ONNX) and labels.json to Pi
 
 on:
   workflow_dispatch:
