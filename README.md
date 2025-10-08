@@ -1,45 +1,35 @@
 # **Pi5_App_Model_CD_pipeline**
-Orchestration repo for deploying Edge AI app and model to Raspberry Pi using Self hosted runners
+Orchestration repo for deploying Edge AI app and model to Raspberry Pi using **Self hosted runners**
 
 The Raspberry Pi used during the developement of this pipeline - Pi5/8GB
 
 ## **Project design**
-The template comes with two workflows ; 
+The template comes with three workflows belonging to two Deployement lanes; 
 
-**1. Model_CD**
+### **1. Model Deployement lane - Model_CD**
 
-See Actions tab under the project Repo - look for workflow **"Model CD - Ship latest ONNX model Pi"**. The workflow is defined at .github/workflows/model_CD_pi.yml
+See Actions tab under the project Repo - look for workflow **"Model CD - Deploy Model (.ONNX) and labels.json to Pi"**. The workflow is defined at .github/workflows/model_CD.yml.
 
-This workflow pulls the final .ONNX model from GitHub Releases, validates it, then ships it to the Pi 5 via a self-hosted runner.
+This workflow picks the final model(.ONNX),then ships it to the Pi 5 via a self-hosted runner.
 
-So to you use this template
+While you use this template ensure the below ;
 
- **1.the final model (.ONNX format) after model training and validation has to be made available to Github release** for deploying the model to Pi5.
+ **1.Model Availability** :  
+    The final model after training and validation has to be made available to **Github release** or **inside the repo (preferably at /Model_dev/artifacts)** for deploying the model to Pi5 (.ONNX format preferred for Raspberry Pi). Optional to keep **label file (.json format)** also.
 
- **2.the Model directory (the directory name at Pi where the .ONNX model and its related files will be stored) must be defined in .env file of the project teamplate. Bu default it is set as opt/edge/models in .env**
+ **2.Model directory in Pi** : 
+ User can choose the Model directory in Pi where the model and arifacts will be stored. They will have to ensure they mount this directory in Application running time. The following Model directories will be in Raspberry Pi <pi5_dir_location>/models ,<pi5_dir_location>/manifests, <pi5_dir_location>/deployements.log, <pi5_dir_location>/current.onnx, <pi5_dir_location>/labels.json (optional).
 
-**2.the following Model directories must be present in Raspberry Pi opt/edge/models ,/opt/edge/models/models ,/opt/edge/models/manifests** - this step explained later.
+ 
+### **2.Application Deployment lane - App_CD**
 
-Please read the readme file under Model_dev section for specific points to keep in mind when you are trianing your model.
-
-
-**2.App CD**
-
-See Actions tab under the project Repo and look for workflow **"App CD - Deploy App Image from GHCR to Pi5"**. The workflow is defined at .github/workflows/app_CD.yml.
-
-This workflow deploys the multi-arch Docker image (amd64/arm64) of the App present in GHCR to the Pi5.
+This lane is for deploying the multi-arch Docker image (amd64/arm64) of the App present in GHCR to the Pi5.
 
 So **to you use this template, the final WebApplication along with ONNX runtime has to be build as a multi-arch Docker image (amd64/arm64) and pushed to GHCR** for deploying the App to Pi5.
 
-Please read readme file under App_dev section for specific points to keep in mind when you are developing and testing your App.
+ 
 
-### **One time set up in Raspberry Pi**
-
-#### **1.Set up Pi directories**
-
---- add ---
-
-#### **2.Set up Self Hosted Runner**
+### **3.Set up Self Hosted Runner**
 The prerequiste for the above two piplelines is to establish an active connection between our Github repo and the Raspberry Pi (where we deploy our App and Model). 
 
 We use **self hosted runners** for this . Setting up a self-hosted runner provides you with the flexibility to run workflows on your own hardware.
@@ -61,9 +51,9 @@ The command will look like ***"curl -o actions-runner-linux-arm64-2.328.0.tar.gz
 
 7. Extract the installer - After step 5, now you can see the runner package as a zip file under the folder /opt/edge/app_model_cd_runner. Unzip that using "***tar xzf ./actions-runner-linux-arm64-2.328.0.tar.gz***"
 
-8. Create the runner and start the configuration . The command will look something like ***./config.sh --url https://github.com/<your github repo> --token XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX***. We will execute an extended version of this command as below;
+8. Create the runner and start the configuration . The command will look something like ***./config.sh --url https://github.com/your-github-repo --token XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX***. We will execute an extended version of this command as below;
 
-    ***./config.sh --url https://github.com/<your github repo> --token XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX --name <runner_name> --labels "pi5,app_model_cd" --unattended***
+    ***./config.sh --url https://github.com/your-github-repo --token XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX --name <runner_name> --labels "pi5,app_model_cd" --unattended***
 
     where name can be set as per requirement. The labels ***pi5,app_model_cd*** has to be set the same way as these values will be used during workflow run in Github actions.
 
@@ -108,7 +98,7 @@ The command will look like ***"curl -o actions-runner-linux-arm64-2.328.0.tar.gz
 
         To stop the self host runner set up in step 9
 
-    d. ***sudo ./svc.sh uninstal***
+    d. ***sudo ./svc.sh uninstall***
 
         To uninstall host runner set up in step 9
 
