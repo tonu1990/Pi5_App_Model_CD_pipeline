@@ -159,6 +159,3 @@ docker info
 3) **Deploy model**: run **Model_CD** → confirms `current.onnx` on the Pi.  
 4) **Deploy app**: run **Web App CD** (or **GUI App CD**) → container starts and reads `MODEL_PATH=/models/current.onnx`.  
 5) **Use it**: open `http://<pi-hostname>:<HOST_PORT>` (Web) or click the desktop icon (GUI).
-
----
-
