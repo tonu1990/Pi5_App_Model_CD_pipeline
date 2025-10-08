@@ -207,7 +207,6 @@ docker info
   ```
 
 ---
-
 #### **6) Deploy the application (pick one lane)**
  **Web App**
 Run **“Web App CD to Pi- Deploy Web App Image from GHCR to Pi5”**  
