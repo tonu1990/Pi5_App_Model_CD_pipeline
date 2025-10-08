@@ -325,6 +325,15 @@ jobs:
     needs: prepare
     runs-on: [self-hosted, app_model_cd]
     steps:
+      - name: Clean workspace
+        if: always()
+        run: |
+          echo "Cleaning workspace before starting..."
+          find . -name "*.onnx" -type f -delete
+          find . -name "sha256.txt" -type f -delete
+          find . -name "manifest.json" -type f -delete
+          echo "Workspace cleaned"
+
       - name: Download deployment bundle
         uses: actions/download-artifact@v4
         with:
