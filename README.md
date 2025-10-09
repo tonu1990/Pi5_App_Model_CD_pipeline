@@ -14,7 +14,7 @@ This template provides **two deployment lanes** and a **one‑time runner setup*
 
 For a quick visual, here’s the high‑level architecture:
 ## Architecture Overview
-![CI/CD Pipeline Flowchart](readme_images\Architecture.jpg)
+![CI/CD Pipeline Flowchart](readme_images/Architecture.jpg)
  
 
 ### **1. Model Deployement lane - Model_CD**
