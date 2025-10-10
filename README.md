@@ -14,8 +14,8 @@ This template provides **two deployment lanes** and a **one‑time runner setup*
 
 For a quick visual, here’s the high‑level architecture:
 ## Architecture Overview
-
-![CI/CD Pipeline Flowchart](readme_images/architecture.png)
+![CI/CD Pipeline Flowchart](readme_images/Architecture.jpg)
+ 
 
 ### **1. Model Deployement lane - Model_CD**
 See **Actions** in this repo → workflow **“Model CD - Deploy Model (.ONNX) and labels.json to Pi”** (defined at `.github/workflows/model_CD.yml`).
